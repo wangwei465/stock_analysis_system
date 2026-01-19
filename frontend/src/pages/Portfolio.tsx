@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   Card,
   Row,
@@ -17,7 +17,9 @@ import {
   Empty,
   Popconfirm,
   message,
-  Select
+  Select,
+  Tabs,
+  Tag
 } from 'antd'
 import {
   FolderOutlined,
@@ -25,10 +27,10 @@ import {
   DeleteOutlined,
   EditOutlined,
   ArrowUpOutlined,
-  ArrowDownOutlined
+  ArrowDownOutlined,
+  UploadOutlined
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import dayjs from 'dayjs'
 import {
   getPortfolios,
   createPortfolio,
@@ -37,9 +39,14 @@ import {
   addPosition,
   deletePosition,
   getPortfolioPerformance,
+  getTransactions,
+  createTransaction,
+  deleteTransaction,
+  importTransactions,
   Portfolio,
   PositionDetail,
-  PortfolioPerformance
+  PortfolioPerformance,
+  Transaction
 } from '../api/portfolio'
 import { searchStocks } from '../api/stocks'
 
@@ -59,6 +66,14 @@ export default function PortfolioPage() {
   const [form] = Form.useForm()
   const [editForm] = Form.useForm()
   const [positionForm] = Form.useForm()
+  const [transactionForm] = Form.useForm()
+
+  // Transaction states
+  const [transactions, setTransactions] = useState<Transaction[]>([])
+  const [transactionsLoading, setTransactionsLoading] = useState(false)
+  const [addTransactionModalOpen, setAddTransactionModalOpen] = useState(false)
+  const [activeTab, setActiveTab] = useState('positions')
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Load portfolios
   useEffect(() => {
@@ -69,6 +84,7 @@ export default function PortfolioPage() {
   useEffect(() => {
     if (selectedPortfolio) {
       loadPerformance(selectedPortfolio)
+      loadTransactions(selectedPortfolio)
     }
   }, [selectedPortfolio])
 
@@ -93,6 +109,18 @@ export default function PortfolioPage() {
       console.error('Error loading performance:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadTransactions = async (id: number) => {
+    setTransactionsLoading(true)
+    try {
+      const data = await getTransactions(id, 100)
+      setTransactions(data)
+    } catch (error) {
+      console.error('Error loading transactions:', error)
+    } finally {
+      setTransactionsLoading(false)
     }
   }
 
@@ -199,6 +227,56 @@ export default function PortfolioPage() {
       await loadPerformance(selectedPortfolio)
     } catch (error) {
       message.error('删除失败')
+    }
+  }
+
+  const handleAddTransaction = async (values: any) => {
+    if (!selectedPortfolio) return
+
+    try {
+      const [code] = values.stock.split('|')
+      await createTransaction(selectedPortfolio, {
+        code,
+        trade_type: values.trade_type,
+        quantity: values.quantity,
+        price: values.price,
+        commission: values.commission || 0,
+        trade_date: values.trade_date?.format('YYYY-MM-DD')
+      })
+      message.success('交易记录添加成功')
+      setAddTransactionModalOpen(false)
+      transactionForm.resetFields()
+      await loadTransactions(selectedPortfolio)
+    } catch (error) {
+      message.error('添加失败')
+    }
+  }
+
+  const handleDeleteTransaction = async (transactionId: number) => {
+    if (!selectedPortfolio) return
+
+    try {
+      await deleteTransaction(selectedPortfolio, transactionId)
+      message.success('交易记录已删除')
+      await loadTransactions(selectedPortfolio)
+    } catch (error) {
+      message.error('删除失败')
+    }
+  }
+
+  const handleImportTransactions = async (file: File) => {
+    if (!selectedPortfolio) return
+
+    try {
+      const result = await importTransactions(selectedPortfolio, file)
+      if (result.total_errors > 0) {
+        message.warning(`导入完成：成功 ${result.imported} 条，失败 ${result.total_errors} 条`)
+      } else {
+        message.success(`成功导入 ${result.imported} 条交易记录`)
+      }
+      await loadTransactions(selectedPortfolio)
+    } catch (error) {
+      message.error('导入失败')
     }
   }
 
@@ -418,12 +496,6 @@ export default function PortfolioPage() {
                 title={<Text style={{ color: '#fff' }}>持仓明细</Text>}
                 extra={
                   <Space>
-                    <Button
-                      icon={<PlusOutlined />}
-                      onClick={() => setAddPositionModalOpen(true)}
-                    >
-                      添加持仓
-                    </Button>
                     <Popconfirm
                       title="确定删除该组合？"
                       onConfirm={() => handleDeletePortfolio(selectedPortfolio)}
@@ -435,13 +507,145 @@ export default function PortfolioPage() {
                   </Space>
                 }
               >
-                <Table
-                  dataSource={performance.positions}
-                  columns={columns}
-                  rowKey="id"
-                  loading={loading}
-                  pagination={false}
-                  size="small"
+                <Tabs
+                  activeKey={activeTab}
+                  onChange={setActiveTab}
+                  items={[
+                    {
+                      key: 'positions',
+                      label: '持仓明细',
+                      children: (
+                        <>
+                          <div style={{ marginBottom: 16 }}>
+                            <Button
+                              icon={<PlusOutlined />}
+                              onClick={() => setAddPositionModalOpen(true)}
+                            >
+                              添加持仓
+                            </Button>
+                          </div>
+                          <Table
+                            dataSource={performance.positions}
+                            columns={columns}
+                            rowKey="id"
+                            loading={loading}
+                            pagination={false}
+                            size="small"
+                          />
+                        </>
+                      )
+                    },
+                    {
+                      key: 'transactions',
+                      label: '交易记录',
+                      children: (
+                        <>
+                          <div style={{ marginBottom: 16 }}>
+                            <Space>
+                              <Button
+                                icon={<PlusOutlined />}
+                                onClick={() => setAddTransactionModalOpen(true)}
+                              >
+                                添加交易
+                              </Button>
+                              <input
+                                type="file"
+                                ref={fileInputRef}
+                                accept=".csv"
+                                style={{ display: 'none' }}
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0]
+                                  if (file) {
+                                    handleImportTransactions(file)
+                                    e.target.value = ''
+                                  }
+                                }}
+                              />
+                              <Button
+                                icon={<UploadOutlined />}
+                                onClick={() => fileInputRef.current?.click()}
+                              >
+                                导入CSV
+                              </Button>
+                            </Space>
+                          </div>
+                          <Table
+                            dataSource={transactions}
+                            columns={[
+                              {
+                                title: '日期',
+                                dataIndex: 'trade_date',
+                                key: 'trade_date',
+                                width: 100,
+                              },
+                              {
+                                title: '股票代码',
+                                dataIndex: 'code',
+                                key: 'code',
+                                width: 100,
+                              },
+                              {
+                                title: '类型',
+                                dataIndex: 'trade_type',
+                                key: 'trade_type',
+                                width: 80,
+                                render: (v: string) => (
+                                  <Tag color={v === 'BUY' ? 'red' : 'green'}>
+                                    {v === 'BUY' ? '买入' : '卖出'}
+                                  </Tag>
+                                )
+                              },
+                              {
+                                title: '数量',
+                                dataIndex: 'quantity',
+                                key: 'quantity',
+                                width: 80,
+                                render: (v: number) => v.toLocaleString()
+                              },
+                              {
+                                title: '价格',
+                                dataIndex: 'price',
+                                key: 'price',
+                                width: 80,
+                                render: (v: number) => v.toFixed(2)
+                              },
+                              {
+                                title: '金额',
+                                key: 'amount',
+                                width: 100,
+                                render: (_: any, record: Transaction) =>
+                                  `¥${(record.quantity * record.price).toLocaleString()}`
+                              },
+                              {
+                                title: '佣金',
+                                dataIndex: 'commission',
+                                key: 'commission',
+                                width: 80,
+                                render: (v: number) => v > 0 ? `¥${v.toFixed(2)}` : '-'
+                              },
+                              {
+                                title: '操作',
+                                key: 'action',
+                                width: 60,
+                                render: (_: any, record: Transaction) => (
+                                  <Popconfirm
+                                    title="确定删除该交易记录？"
+                                    onConfirm={() => handleDeleteTransaction(record.id)}
+                                  >
+                                    <Button type="text" danger icon={<DeleteOutlined />} />
+                                  </Popconfirm>
+                                )
+                              }
+                            ]}
+                            rowKey="id"
+                            loading={transactionsLoading}
+                            pagination={{ pageSize: 20 }}
+                            size="small"
+                          />
+                        </>
+                      )
+                    }
+                  ]}
                 />
               </Card>
             </>
@@ -560,6 +764,65 @@ export default function PortfolioPage() {
               formatter={v => `¥ ${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
               parser={v => v!.replace(/¥\s?|(,*)/g, '') as any}
             />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* Add Transaction Modal */}
+      <Modal
+        title="添加交易记录"
+        open={addTransactionModalOpen}
+        onCancel={() => {
+          setAddTransactionModalOpen(false)
+          transactionForm.resetFields()
+        }}
+        onOk={() => transactionForm.submit()}
+      >
+        <Form form={transactionForm} layout="vertical" onFinish={handleAddTransaction}>
+          <Form.Item
+            name="stock"
+            label="股票"
+            rules={[{ required: true, message: '请选择股票' }]}
+          >
+            <Select
+              showSearch
+              placeholder="搜索股票代码或名称"
+              filterOption={false}
+              onSearch={handleSearchStock}
+              options={stockOptions}
+            />
+          </Form.Item>
+          <Form.Item
+            name="trade_type"
+            label="交易类型"
+            rules={[{ required: true, message: '请选择交易类型' }]}
+          >
+            <Select
+              options={[
+                { value: 'BUY', label: '买入' },
+                { value: 'SELL', label: '卖出' }
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name="quantity"
+            label="数量"
+            rules={[{ required: true, message: '请输入数量' }]}
+          >
+            <InputNumber style={{ width: '100%' }} min={100} step={100} />
+          </Form.Item>
+          <Form.Item
+            name="price"
+            label="价格"
+            rules={[{ required: true, message: '请输入价格' }]}
+          >
+            <InputNumber style={{ width: '100%' }} min={0} step={0.01} precision={2} />
+          </Form.Item>
+          <Form.Item name="commission" label="佣金">
+            <InputNumber style={{ width: '100%' }} min={0} step={0.01} precision={2} />
+          </Form.Item>
+          <Form.Item name="trade_date" label="交易日期">
+            <DatePicker style={{ width: '100%' }} />
           </Form.Item>
         </Form>
       </Modal>

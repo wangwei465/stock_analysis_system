@@ -130,3 +130,56 @@ export async function getPortfoliosSummary(): Promise<PortfolioSummary> {
   const response = await client.get<PortfolioSummary>('/portfolios/summary/all')
   return response.data
 }
+
+// Transaction types
+export interface Transaction {
+  id: number
+  portfolio_id: number
+  code: string
+  trade_type: 'BUY' | 'SELL'
+  quantity: number
+  price: number
+  commission: number
+  trade_date: string
+  created_at: string
+}
+
+export interface CreateTransactionRequest {
+  code: string
+  trade_type: 'BUY' | 'SELL'
+  quantity: number
+  price: number
+  commission?: number
+  trade_date?: string
+}
+
+export interface ImportResult {
+  imported: number
+  errors: string[]
+  total_errors: number
+}
+
+export async function getTransactions(portfolioId: number, limit = 50): Promise<Transaction[]> {
+  const response = await client.get<Transaction[]>(`/portfolios/${portfolioId}/transactions`, {
+    params: { limit }
+  })
+  return response.data
+}
+
+export async function createTransaction(portfolioId: number, data: CreateTransactionRequest): Promise<Transaction> {
+  const response = await client.post<Transaction>(`/portfolios/${portfolioId}/transactions`, data)
+  return response.data
+}
+
+export async function deleteTransaction(portfolioId: number, transactionId: number): Promise<void> {
+  await client.delete(`/portfolios/${portfolioId}/transactions/${transactionId}`)
+}
+
+export async function importTransactions(portfolioId: number, file: File): Promise<ImportResult> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const response = await client.post<ImportResult>(`/portfolios/${portfolioId}/transactions/import`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+  return response.data
+}

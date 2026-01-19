@@ -1,10 +1,12 @@
 """Portfolio management API endpoints"""
 from typing import List, Optional
 from datetime import date
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 from pydantic import BaseModel
+import csv
+import io
 
 from app.database import get_session
 from app.models.portfolio import Portfolio, Position, Transaction
@@ -38,6 +40,15 @@ class PortfolioUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     initial_capital: Optional[float] = None
+
+
+class TransactionCreate(BaseModel):
+    code: str
+    trade_type: str  # BUY or SELL
+    quantity: int
+    price: float
+    commission: Optional[float] = 0
+    trade_date: Optional[date] = None
 
 
 # Portfolio CRUD
@@ -426,4 +437,115 @@ async def get_all_portfolios_summary(session: AsyncSession = Depends(get_session
         "total_cash": round(total_cash, 2),
         "position_ratio": round(position_ratio, 2),
         "portfolios": portfolio_summaries
+    }
+
+
+# Transaction CRUD
+@router.post("/{portfolio_id}/transactions")
+async def create_transaction(
+    portfolio_id: int,
+    transaction: TransactionCreate,
+    session: AsyncSession = Depends(get_session)
+):
+    """Create a new transaction record"""
+    portfolio = await session.get(Portfolio, portfolio_id)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    if transaction.trade_type not in ["BUY", "SELL"]:
+        raise HTTPException(status_code=400, detail="trade_type must be BUY or SELL")
+
+    db_transaction = Transaction(
+        portfolio_id=portfolio_id,
+        code=transaction.code,
+        trade_type=transaction.trade_type,
+        quantity=transaction.quantity,
+        price=transaction.price,
+        commission=transaction.commission or 0,
+        trade_date=transaction.trade_date or date.today()
+    )
+    session.add(db_transaction)
+    await session.commit()
+    await session.refresh(db_transaction)
+    return db_transaction
+
+
+@router.delete("/{portfolio_id}/transactions/{transaction_id}")
+async def delete_transaction(
+    portfolio_id: int,
+    transaction_id: int,
+    session: AsyncSession = Depends(get_session)
+):
+    """Delete a transaction record"""
+    transaction = await session.get(Transaction, transaction_id)
+    if not transaction or transaction.portfolio_id != portfolio_id:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    await session.delete(transaction)
+    await session.commit()
+    return {"message": "Transaction deleted"}
+
+
+@router.post("/{portfolio_id}/transactions/import")
+async def import_transactions(
+    portfolio_id: int,
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Import transactions from CSV file.
+    CSV format: code,trade_type,quantity,price,commission,trade_date
+    Example: 000001,BUY,1000,10.50,5.25,2024-01-15
+    """
+    portfolio = await session.get(Portfolio, portfolio_id)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+    content = await file.read()
+    try:
+        decoded = content.decode('utf-8-sig')  # Handle BOM
+    except UnicodeDecodeError:
+        decoded = content.decode('gbk')  # Try GBK for Chinese Excel
+
+    reader = csv.DictReader(io.StringIO(decoded))
+    imported = 0
+    errors = []
+
+    for row_num, row in enumerate(reader, start=2):
+        try:
+            code = row.get('code', '').strip()
+            trade_type = row.get('trade_type', '').strip().upper()
+            quantity = int(row.get('quantity', 0))
+            price = float(row.get('price', 0))
+            commission = float(row.get('commission', 0) or 0)
+            trade_date_str = row.get('trade_date', '').strip()
+
+            if not code or trade_type not in ['BUY', 'SELL'] or quantity <= 0 or price <= 0:
+                errors.append(f"Row {row_num}: Invalid data")
+                continue
+
+            trade_date_val = date.fromisoformat(trade_date_str) if trade_date_str else date.today()
+
+            db_transaction = Transaction(
+                portfolio_id=portfolio_id,
+                code=code,
+                trade_type=trade_type,
+                quantity=quantity,
+                price=price,
+                commission=commission,
+                trade_date=trade_date_val
+            )
+            session.add(db_transaction)
+            imported += 1
+        except Exception as e:
+            errors.append(f"Row {row_num}: {str(e)}")
+
+    await session.commit()
+    return {
+        "imported": imported,
+        "errors": errors[:10],  # Return first 10 errors
+        "total_errors": len(errors)
     }
