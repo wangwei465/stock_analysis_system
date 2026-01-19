@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
 
-# Lazy import AKShare
+# 延迟导入 AKShare（可选依赖）：
+# - 部署环境未安装 akshare 时，不让整个服务启动失败，而是将情绪分析相关接口降级为“无数据”。
 _ak = None
 HAS_AKSHARE = True
 
@@ -70,12 +71,15 @@ class StockNewsFetcher:
 
         try:
             # 获取个股新闻
-            # 注意: 需要去掉前缀如 sh/sz
+            # 注意：AKShare 的 stock_news_em 接口一般需要传“纯数字代码”，
+            # 因此这里把可能出现的 `sh/sz` 前缀、`.` 等分隔符都清理掉。
             code = stock_code.replace('sh', '').replace('sz', '').replace('.', '')
 
             ak = get_akshare()
             if ak is None:
                 return []
+            # AKShare: stock_news_em 返回个股相关新闻列表，常见字段包括：
+            # - 新闻标题、新闻内容、新闻来源、发布时间、新闻链接
             df = ak.stock_news_em(symbol=code)
 
             if df is not None and not df.empty:
@@ -111,11 +115,14 @@ class StockNewsFetcher:
             ak = get_akshare()
             if ak is None:
                 return []
+            # AKShare: stock_info_global_cls 获取财联社电报资讯。
+            # 传参 symbol='全部' 表示拉取全量资讯，随后再按 limit 截断。
             df = ak.stock_info_global_cls(symbol='全部')
 
             if df is not None and not df.empty:
                 for _, row in df.head(limit).iterrows():
-                    # 获取列名（可能有编码问题，使用索引位置）
+                    # 获取列名（不同环境/版本可能存在差异），这里使用“索引位置”读取更稳妥。
+                    # 约定：前几列依次为 标题/内容/日期/时间（若接口变更，可在此处调整索引映射）。
                     cols = df.columns.tolist()
                     title = row[cols[0]] if len(cols) > 0 else ''
                     content = row[cols[1]] if len(cols) > 1 else ''

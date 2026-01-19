@@ -6,10 +6,11 @@ from cachetools import TTLCache
 
 from .async_utils import run_sync
 
-# Lazy import AKShare
+# 延迟导入 AKShare：避免在服务启动时引入重依赖导致冷启动变慢。
 _ak = None
 
 def get_akshare():
+    """按需加载并缓存 AKShare 模块对象（`import akshare as ak` 的返回值）。"""
     global _ak
     if _ak is None:
         import akshare as ak
@@ -27,6 +28,8 @@ def _get_company_profile_sync(symbol: str) -> Optional[pd.DataFrame]:
     """Sync function to get company profile"""
     try:
         ak = get_akshare()
+        # AKShare: stock_individual_info_em 获取个股基本信息/公司概况，返回 item/value 结构的 DataFrame。
+        # - symbol 为“纯数字股票代码”（不带 .SZ/.SH）
         return ak.stock_individual_info_em(symbol=symbol)
     except Exception as e:
         print(f"Error fetching profile for {symbol}: {e}")
@@ -37,6 +40,8 @@ def _get_financial_report_sync(symbol: str, report_type: str) -> Optional[pd.Dat
     """Sync function to get financial report"""
     try:
         ak = get_akshare()
+        # AKShare: stock_financial_report_sina 通过 Sina 数据源拉取财务报表。
+        # 该接口的报表类型参数使用中文名（利润表/资产负债表/现金流量表），因此这里做一次映射。
         symbol_map = {
             "income": "利润表",
             "balance": "资产负债表",
@@ -55,9 +60,11 @@ def _get_valuation_sync(symbol: str) -> tuple:
     """Sync function to get valuation data (returns bid_ask_df and info_df)"""
     try:
         ak = get_akshare()
+        # AKShare: stock_bid_ask_em 获取盘口/实时行情（item/value 结构），适合提取换手率、量比、振幅等实时指标。
         bid_ask_df = ak.stock_bid_ask_em(symbol=symbol)
         info_df = None
         try:
+            # AKShare: stock_individual_info_em 作为补充数据源，用于补齐 PE/PB/市值等基本面字段。
             info_df = ak.stock_individual_info_em(symbol=symbol)
         except Exception:
             pass
@@ -71,6 +78,8 @@ def _get_dividend_history_sync(symbol: str) -> Optional[pd.DataFrame]:
     """Sync function to get dividend history"""
     try:
         ak = get_akshare()
+        # AKShare: stock_history_dividend_detail 获取历史分红/送转等权益信息。
+        # indicator='分红' 表示只取分红相关记录。
         return ak.stock_history_dividend_detail(
             symbol=symbol,
             indicator="分红"
@@ -84,6 +93,7 @@ def _get_top_holders_sync(symbol: str) -> Optional[pd.DataFrame]:
     """Sync function to get top shareholders"""
     try:
         ak = get_akshare()
+        # AKShare: stock_circulate_stock_holder 获取流通股东信息（包含季度、股东名称、持股数量等字段）。
         return ak.stock_circulate_stock_holder(symbol=symbol)
     except Exception as e:
         print(f"Error fetching top holders for {symbol}: {e}")
@@ -111,6 +121,7 @@ class FundamentalAnalyzer:
         # Convert to dict
         profile = {}
         for _, row in df.iterrows():
+            # stock_individual_info_em 返回为两列：item(指标名) / value(指标值)
             key = row['item']
             value = row['value']
             profile[key] = value
@@ -175,6 +186,7 @@ class FundamentalAnalyzer:
             return None
 
         # Convert to dict format (item-value structure)
+        # stock_bid_ask_em 同样是 item/value 结构：把它转成 dict，便于按中文指标名取值。
         data = dict(zip(bid_ask_df['item'], bid_ask_df['value']))
 
         def safe_float(val, default=None):
@@ -203,7 +215,8 @@ class FundamentalAnalyzer:
             info_data = dict(zip(info_df['item'], info_df['value']))
 
             def parse_market_cap(val):
-                """Parse market cap string like '1234.56亿' -> 123456000000"""
+                # AKShare 的市值字段有时是带单位的字符串（例如：1234.56亿/789.01万）。
+                # 这里统一解析为“元”口径的数值，便于前端展示或后续计算。
                 if not val:
                     return None
                 try:

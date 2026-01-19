@@ -5,10 +5,11 @@ from cachetools import TTLCache
 
 from .async_utils import run_sync
 
-# Lazy import AKShare
+# 延迟导入 AKShare：避免在服务启动时加载过慢；筛选接口会在真正需要时才触发调用。
 _ak = None
 
 def get_akshare():
+    """按需加载并缓存 AKShare 模块对象（`import akshare as ak` 的返回值）。"""
     global _ak
     if _ak is None:
         import akshare as ak
@@ -20,12 +21,15 @@ def _fetch_all_stocks_sync() -> pd.DataFrame:
     """Sync function to fetch all stocks data (to be wrapped with run_sync)"""
     try:
         ak = get_akshare()
+        # AKShare: stock_zh_a_spot_em 获取全市场 A 股实时快照（全量数据，较大且较慢）。
+        # 本项目将其作为“筛选器”的基础数据源，并配合 TTL 缓存降低请求频率。
         df = ak.stock_zh_a_spot_em()
 
         if df.empty:
             return pd.DataFrame()
 
-        # Convert market cap to 100 million
+        # 口径统一：AKShare 返回的“总市值/流通市值”通常为“元”，
+        # 为了便于前端展示与筛选阈值设置，这里统一换算为“亿元”（除以 1e8）。
         if '总市值' in df.columns:
             df['总市值'] = df['总市值'] / 100000000
         if '流通市值' in df.columns:

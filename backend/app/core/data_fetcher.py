@@ -7,11 +7,16 @@ from cachetools import TTLCache
 
 from .async_utils import run_sync
 
-# Lazy import AKShare to avoid slow startup
+# 延迟导入 AKShare：AKShare 首次 import 可能较慢（依赖多、初始化重），
+# 如果在 FastAPI 启动阶段直接导入，会显著拉长冷启动时间；因此这里改为按需加载。
 _ak = None
 
 def get_akshare():
-    """Lazy load akshare module"""
+    """
+    按需加载并缓存 AKShare 模块实例。
+
+    返回值就是 `import akshare as ak` 得到的模块对象，后续通过 `ak.xxx()` 调用具体接口。
+    """
     global _ak
     if _ak is None:
         import akshare as ak
@@ -34,6 +39,8 @@ class StockDataFetcher:
 
         try:
             ak = get_akshare()
+            # AKShare: stock_info_a_code_name 返回 A 股代码与名称等基础信息。
+            # 本项目在此基础上补充 market/full_code 字段，用作系统内部统一股票标识。
             df = ak.stock_info_a_code_name()
             # Add market suffix
             df['market'] = df['code'].apply(
@@ -122,6 +129,11 @@ class StockDataFetcher:
 
         try:
             ak = get_akshare()
+            # AKShare: stock_zh_a_hist 用于获取历史 K 线数据。
+            # - symbol 仅为“纯数字股票代码”，不带 .SZ/.SH 后缀
+            # - period 取 daily/weekly/monthly
+            # - start_date/end_date 格式为 YYYYMMDD
+            # - adjust 取 qfq(前复权)/hfq(后复权)/''(不复权)；AKShare 通常用空串表示不复权
             df = ak.stock_zh_a_hist(
                 symbol=symbol,
                 period="daily",
@@ -136,7 +148,8 @@ class StockDataFetcher:
             # 打印实际列名用于调试
             print(f"[DEBUG] Kline columns for {code}: {list(df.columns)}")
 
-            # 动态列名映射（兼容 AKShare 不同版本返回的列数）
+            # 动态列名映射：AKShare 在不同版本/数据源下，列名可能有差异；
+            # 这里把中文列名统一映射为英文字段，便于后续计算与前端对接。
             column_mapping = {
                 '日期': 'date',
                 '开盘': 'open',
@@ -186,6 +199,7 @@ class StockDataFetcher:
 
         try:
             ak = get_akshare()
+            # 同 get_daily_kline：使用 stock_zh_a_hist 获取“周线”数据（period="weekly"）
             df = ak.stock_zh_a_hist(
                 symbol=symbol,
                 period="weekly",
@@ -239,6 +253,7 @@ class StockDataFetcher:
 
         try:
             ak = get_akshare()
+            # 同 get_daily_kline：使用 stock_zh_a_hist 获取“月线”数据（period="monthly"）
             df = ak.stock_zh_a_hist(
                 symbol=symbol,
                 period="monthly",
@@ -282,13 +297,14 @@ class StockDataFetcher:
 
         try:
             ak = get_akshare()
-            # 按需获取单只股票数据（替代 stock_zh_a_spot_em 全量获取）
+            # AKShare: stock_bid_ask_em 返回单只股票盘口/实时行情（item/value 两列）。
+            # 相比 stock_zh_a_spot_em（全市场快照），该接口更轻量，适合“按需查询单股”报价。
             df = ak.stock_bid_ask_em(symbol=symbol)
 
             if df.empty:
                 return None
 
-            # 转换为字典格式 (item-value 结构)
+            # 将 item/value 结构转换为 dict，方便按中文指标名取值。
             data = dict(zip(df['item'], df['value']))
 
             def safe_float(val, default=0):
@@ -313,8 +329,10 @@ class StockDataFetcher:
                 'high': safe_float(data.get('最高')),
                 'low': safe_float(data.get('最低')),
                 'pre_close': safe_float(data.get('昨收')),
-                'volume': safe_int(data.get('总手')),  # 修正字段名：总手（单位：手）
-                'amount': safe_float(data.get('金额')),  # 修正字段名：金额（单位：元）
+                # 注意：AKShare 返回的“总手”单位通常为“手”（1手=100股），前端如需“股”可再换算。
+                'volume': safe_int(data.get('总手')),
+                # 注意：金额字段通常为“元”，用于成交额/均价等计算时请保持口径一致。
+                'amount': safe_float(data.get('金额')),
                 'time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
 
@@ -334,7 +352,9 @@ class StockDataFetcher:
             DataFrame with minute-level price and volume data
         """
         symbol = code.split('.')[0]
-        # Convert to sina format: sh600000 or sz000001
+        # AKShare 的 stock_zh_a_minute 接口使用 Sina 行情代码格式：
+        # - 上证: sh600000
+        # - 深证: sz000001
         if symbol.startswith('6'):
             sina_symbol = f'sh{symbol}'
         else:
@@ -342,25 +362,27 @@ class StockDataFetcher:
 
         try:
             ak = get_akshare()
-            # Get 1-minute data
+            # AKShare: stock_zh_a_minute 获取分钟线数据。
+            # period='1' 表示 1 分钟粒度；adjust='' 表示不复权（分钟线一般也不做复权）。
             df = ak.stock_zh_a_minute(symbol=sina_symbol, period='1', adjust='')
 
             if df.empty:
                 return pd.DataFrame()
 
-            # Rename columns - API returns 'day' not 'time'
+            # 接口返回的时间列通常叫 day，这里统一重命名为 time，便于前端/图表组件消费。
             df.columns = ['time', 'open', 'high', 'low', 'close', 'volume']
 
             # Parse time - the format is like "2024-01-17 09:31:00"
             df['time'] = pd.to_datetime(df['time'])
 
-            # Filter to get the latest trading day's data (not necessarily today)
-            # This handles weekends and holidays correctly
+            # 只取“最新一个交易日”的分时数据（不一定是今天）：
+            # - 周末/节假日访问时，AKShare 仍可能返回最近交易日数据
+            # - 这里按日期最大值筛选，保证分时图展示口径正确
             if len(df) > 0:
                 latest_date = df['time'].dt.date.max()
                 df = df[df['time'].dt.date == latest_date]
 
-            # Convert numeric columns
+            # 数值列转换：AKShare 可能返回字符串或包含缺失值，这里统一转为数值，无法解析的置为 NaN。
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 

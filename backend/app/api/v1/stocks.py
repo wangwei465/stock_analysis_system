@@ -137,13 +137,17 @@ async def get_intraday_data(code: str):
     cumulative_volume = 0
 
     for _, row in df.iterrows():
-        cumulative_volume += int(row['volume'])
-        # Estimate amount from close price * volume (volume is in 手, 1手=100股)
-        amount = float(row['close']) * float(row['volume']) * 100
+        # AKShare 分钟线（stock_zh_a_minute）返回的 volume 字段口径通常为“手”（1 手 = 100 股）。
+        # 为了和系统内部成交量/均价计算统一为“股”的口径，这里统一换算成股数。
+        volume = int(row['volume']) * 100
+        cumulative_volume += volume
+
+        # Calculate amount: price * volume
+        amount = float(row['close']) * volume
         cumulative_amount += amount
 
         # Calculate average price (均价)
-        avg_price = cumulative_amount / (cumulative_volume * 100) if cumulative_volume > 0 else float(row['close'])
+        avg_price = cumulative_amount / cumulative_volume if cumulative_volume > 0 else float(row['close'])
 
         # Return full datetime for lightweight-charts compatibility
         # Format: "YYYY-MM-DD HH:MM" for proper time parsing
@@ -153,7 +157,7 @@ async def get_intraday_data(code: str):
             time=time_str,
             price=round(float(row['close']), 2),
             avg_price=round(avg_price, 2),
-            volume=int(row['volume']),
+            volume=volume,
             amount=round(amount, 2)
         ))
 

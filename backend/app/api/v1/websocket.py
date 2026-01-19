@@ -159,17 +159,22 @@ class IntradayConnectionManager:
         cumulative_volume = 0
 
         for _, row in df.iterrows():
-            cumulative_volume += int(row['volume'])
-            amount = float(row['close']) * float(row['volume']) * 100
+            # AKShare 分钟线（stock_zh_a_minute）返回的 volume 字段口径通常为“手”（1 手 = 100 股）。
+            # websocket 推送端与 REST 接口保持一致：统一换算为“股”，便于前端直接展示/计算。
+            volume = int(row['volume']) * 100
+            cumulative_volume += volume
+
+            # Calculate amount: price * volume
+            amount = float(row['close']) * volume
             cumulative_amount += amount
-            avg_price = cumulative_amount / (cumulative_volume * 100) if cumulative_volume > 0 else float(row['close'])
+            avg_price = cumulative_amount / cumulative_volume if cumulative_volume > 0 else float(row['close'])
 
             time_str = row['time'].strftime('%Y-%m-%d %H:%M')
             intraday_data.append({
                 'time': time_str,
                 'price': round(float(row['close']), 2),
                 'avg_price': round(avg_price, 2),
-                'volume': int(row['volume']),
+                'volume': volume,
                 'amount': round(amount, 2)
             })
 
