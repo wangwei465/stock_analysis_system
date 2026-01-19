@@ -43,3 +43,4 @@ backend/data/models/*.joblib
 backend/data/models/*.pkl
 nul
 .claude/settings.local.json
+/.python-version

@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import type { TableProps } from 'antd'
+import type { SorterResult } from 'antd/es/table/interface'
 import {
   Card,
   Row,
@@ -13,8 +15,7 @@ import {
   message,
   Tooltip,
   Dropdown,
-  Checkbox,
-  Divider
+  Checkbox
 } from 'antd'
 import {
   FilterOutlined,
@@ -235,6 +236,37 @@ export default function Screener() {
     setExcludeBoards(['star', 'gem'])
   }
 
+  // 处理表格排序变化
+  const handleTableChange: TableProps<ScreenerResult>['onChange'] = (_pagination, _filters, sorter) => {
+    const sorterResult = sorter as SorterResult<ScreenerResult>
+    if (sorterResult.field && sorterResult.order) {
+      const newSortBy = sorterResult.field as string
+      const newSortOrder = sorterResult.order === 'ascend' ? 'asc' : 'desc'
+      setSortBy(newSortBy)
+      setSortOrder(newSortOrder)
+      // 触发搜索
+      setLoading(true)
+      filterStocks({
+        conditions,
+        sort_by: newSortBy,
+        sort_order: newSortOrder,
+        page: 1,
+        page_size: pageSize,
+        market_boards: selectedBoards.length > 0 ? selectedBoards : undefined,
+        exclude_boards: excludeBoards.length > 0 ? excludeBoards : undefined
+      }).then(response => {
+        setResults(response.data)
+        setTotal(response.total)
+        setPage(1)
+      }).catch(error => {
+        console.error('Error filtering stocks:', error)
+        message.error('排序失败')
+      }).finally(() => {
+        setLoading(false)
+      })
+    }
+  }
+
   const columns = [
     {
       title: '代码',
@@ -274,6 +306,7 @@ export default function Screener() {
       dataIndex: 'change_pct',
       key: 'change_pct',
       width: 90,
+      sorter: true,
       render: (v: number) => v != null ? (
         <span style={{ color: v >= 0 ? '#ef4444' : '#10b981' }}>
           {v >= 0 ? '+' : ''}{v.toFixed(2)}%
@@ -555,6 +588,7 @@ export default function Screener() {
           columns={columns}
           rowKey="code"
           loading={loading}
+          onChange={handleTableChange}
           pagination={{
             current: page,
             pageSize,
