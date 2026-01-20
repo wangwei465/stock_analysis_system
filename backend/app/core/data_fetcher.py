@@ -1,11 +1,12 @@
 """Stock data fetcher using AKShare"""
-import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-from functools import lru_cache
-from cachetools import TTLCache
 
-from .async_utils import run_sync
+import pandas as pd
+
+from app.config import settings
+from .async_utils import run_sync, run_akshare
+from .cache_manager import CacheManager, CacheConfig, CacheLevel
 
 # 延迟导入 AKShare：AKShare 首次 import 可能较慢（依赖多、初始化重），
 # 如果在 FastAPI 启动阶段直接导入，会显著拉长冷启动时间；因此这里改为按需加载。
@@ -23,20 +24,60 @@ def get_akshare():
         _ak = ak
     return _ak
 
-# Cache for stock list (1 hour TTL)
-_stock_list_cache = TTLCache(maxsize=1, ttl=3600)
+CACHE_CONFIGS = {
+    "stock_list": CacheConfig(
+        ttl=timedelta(seconds=settings.cache_ttl_stock_list),
+        max_size=1,
+        level=CacheLevel.BOTH,
+        namespace="stock",
+    ),
+    "daily_kline_history": CacheConfig(
+        ttl=timedelta(seconds=settings.cache_ttl_kline_history),
+        max_size=500,
+        level=CacheLevel.BOTH,
+        namespace="kline",
+    ),
+    "daily_kline_today": CacheConfig(
+        ttl=timedelta(seconds=settings.cache_ttl_kline_today),
+        max_size=500,
+        level=CacheLevel.L1_MEMORY,
+        namespace="kline",
+    ),
+    "weekly_kline": CacheConfig(
+        ttl=timedelta(seconds=settings.cache_ttl_kline_history),
+        max_size=300,
+        level=CacheLevel.BOTH,
+        namespace="kline",
+    ),
+    "monthly_kline": CacheConfig(
+        ttl=timedelta(seconds=settings.cache_ttl_kline_history),
+        max_size=200,
+        level=CacheLevel.BOTH,
+        namespace="kline",
+    ),
+    "realtime_quote": CacheConfig(
+        ttl=timedelta(seconds=settings.cache_ttl_realtime),
+        max_size=1000,
+        level=CacheLevel.L1_MEMORY,
+        namespace="quote",
+    ),
+    "intraday": CacheConfig(
+        ttl=timedelta(seconds=settings.cache_ttl_intraday),
+        max_size=500,
+        level=CacheLevel.L1_MEMORY,
+        namespace="intraday",
+    ),
+}
 
 
 class StockDataFetcher:
     """A-share stock data fetcher using AKShare"""
 
+    _cache = CacheManager()
+
     @staticmethod
     def get_stock_list() -> pd.DataFrame:
         """Get A-share stock list"""
-        cache_key = "stock_list"
-        if cache_key in _stock_list_cache:
-            return _stock_list_cache[cache_key]
-
         try:
             ak = get_akshare()
             # AKShare: stock_info_a_code_name 返回 A 股代码与名称等基础信息。
@@ -50,7 +91,6 @@ class StockDataFetcher:
                 lambda row: f"{row['code']}.{'SH' if row['code'].startswith('6') else 'SZ'}",
                 axis=1
             )
-            _stock_list_cache[cache_key] = df
             return df
         except Exception as e:
             print(f"Error fetching stock list: {e}")
@@ -398,17 +438,58 @@ class StockDataFetcher:
     @staticmethod
     async def get_stock_list_async() -> pd.DataFrame:
         """Async version of get_stock_list"""
-        return await run_sync(StockDataFetcher.get_stock_list)
+        config = CACHE_CONFIGS["stock_list"]
+
+        async def fetch() -> pd.DataFrame:
+            return await run_akshare(StockDataFetcher.get_stock_list)
+
+        result = await StockDataFetcher._cache.get("stock_list", config, fetch)
+        return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
 
     @staticmethod
     async def search_stocks_async(keyword: str, limit: int = 20) -> List[Dict[str, str]]:
         """Async version of search_stocks"""
-        return await run_sync(StockDataFetcher.search_stocks, keyword, limit)
+        df = await StockDataFetcher.get_stock_list_async()
+        if df.empty:
+            return []
+
+        def _filter() -> List[Dict[str, str]]:
+            mask = (
+                df['code'].str.contains(keyword, na=False) |
+                df['name'].str.contains(keyword, na=False)
+            )
+            results = df[mask].head(limit)
+            return [
+                {
+                    'code': row['full_code'],
+                    'name': row['name'],
+                    'market': row['market']
+                }
+                for _, row in results.iterrows()
+            ]
+
+        return await run_sync(_filter)
 
     @staticmethod
     async def get_stock_info_async(code: str) -> Optional[Dict[str, Any]]:
         """Async version of get_stock_info"""
-        return await run_sync(StockDataFetcher.get_stock_info, code)
+        df = await StockDataFetcher.get_stock_list_async()
+        if df.empty:
+            return None
+
+        def _find() -> Optional[Dict[str, Any]]:
+            pure_code = code.split('.')[0]
+            row = df[df['code'] == pure_code]
+            if row.empty:
+                return None
+            row = row.iloc[0]
+            return {
+                'code': code,
+                'name': row['name'],
+                'market': row['market']
+            }
+
+        return await run_sync(_find)
 
     @staticmethod
     async def get_daily_kline_async(
@@ -418,10 +499,24 @@ class StockDataFetcher:
         adjust: str = "qfq"
     ) -> pd.DataFrame:
         """Async version of get_daily_kline"""
-        return await run_sync(
-            StockDataFetcher.get_daily_kline,
-            code, start_date, end_date, adjust
-        )
+        if start_date is None:
+            start_date = "20200101"
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y%m%d")
+
+        today = datetime.now().strftime("%Y%m%d")
+        is_today_included = end_date >= today
+        config = CACHE_CONFIGS["daily_kline_today"] if is_today_included else CACHE_CONFIGS["daily_kline_history"]
+        cache_key = f"daily:{code}:{start_date}:{end_date}:{adjust}"
+
+        async def fetch() -> pd.DataFrame:
+            return await run_akshare(
+                StockDataFetcher.get_daily_kline,
+                code, start_date, end_date, adjust
+            )
+
+        result = await StockDataFetcher._cache.get(cache_key, config, fetch)
+        return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
 
     @staticmethod
     async def get_weekly_kline_async(
@@ -431,10 +526,22 @@ class StockDataFetcher:
         adjust: str = "qfq"
     ) -> pd.DataFrame:
         """Async version of get_weekly_kline"""
-        return await run_sync(
-            StockDataFetcher.get_weekly_kline,
-            code, start_date, end_date, adjust
-        )
+        if start_date is None:
+            start_date = "20200101"
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y%m%d")
+
+        config = CACHE_CONFIGS["weekly_kline"]
+        cache_key = f"weekly:{code}:{start_date}:{end_date}:{adjust}"
+
+        async def fetch() -> pd.DataFrame:
+            return await run_akshare(
+                StockDataFetcher.get_weekly_kline,
+                code, start_date, end_date, adjust
+            )
+
+        result = await StockDataFetcher._cache.get(cache_key, config, fetch)
+        return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
 
     @staticmethod
     async def get_monthly_kline_async(
@@ -444,18 +551,43 @@ class StockDataFetcher:
         adjust: str = "qfq"
     ) -> pd.DataFrame:
         """Async version of get_monthly_kline"""
-        return await run_sync(
-            StockDataFetcher.get_monthly_kline,
-            code, start_date, end_date, adjust
-        )
+        if start_date is None:
+            start_date = "20200101"
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y%m%d")
+
+        config = CACHE_CONFIGS["monthly_kline"]
+        cache_key = f"monthly:{code}:{start_date}:{end_date}:{adjust}"
+
+        async def fetch() -> pd.DataFrame:
+            return await run_akshare(
+                StockDataFetcher.get_monthly_kline,
+                code, start_date, end_date, adjust
+            )
+
+        result = await StockDataFetcher._cache.get(cache_key, config, fetch)
+        return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
 
     @staticmethod
     async def get_realtime_quote_async(code: str) -> Optional[Dict[str, Any]]:
         """Async version of get_realtime_quote"""
-        return await run_sync(StockDataFetcher.get_realtime_quote, code)
+        config = CACHE_CONFIGS["realtime_quote"]
+        cache_key = code
+
+        async def fetch() -> Optional[Dict[str, Any]]:
+            return await run_akshare(StockDataFetcher.get_realtime_quote, code)
+
+        return await StockDataFetcher._cache.get(cache_key, config, fetch)
 
     @staticmethod
     async def get_intraday_data_async(code: str) -> pd.DataFrame:
         """Async version of get_intraday_data"""
-        return await run_sync(StockDataFetcher.get_intraday_data, code)
+        config = CACHE_CONFIGS["intraday"]
+        cache_key = code
+
+        async def fetch() -> pd.DataFrame:
+            return await run_akshare(StockDataFetcher.get_intraday_data, code)
+
+        result = await StockDataFetcher._cache.get(cache_key, config, fetch)
+        return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
 

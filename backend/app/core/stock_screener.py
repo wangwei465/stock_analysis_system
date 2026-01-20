@@ -1,9 +1,12 @@
 """Stock screener core logic"""
-import pandas as pd
+from datetime import timedelta
 from typing import List, Dict, Any, Optional
-from cachetools import TTLCache
 
-from .async_utils import run_sync
+import pandas as pd
+
+from app.config import settings
+from .async_utils import run_akshare
+from .cache_manager import CacheManager, CacheConfig, CacheLevel
 
 # 延迟导入 AKShare：避免在服务启动时加载过慢；筛选接口会在真正需要时才触发调用。
 _ak = None
@@ -41,8 +44,14 @@ def _fetch_all_stocks_sync() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-# Cache for stock data (5 minutes TTL)
-_stock_data_cache = TTLCache(maxsize=1, ttl=300)
+CACHE_CONFIGS = {
+    "market_snapshot": CacheConfig(
+        ttl=timedelta(seconds=settings.cache_ttl_market_snapshot),
+        max_size=1,
+        level=CacheLevel.BOTH,
+        namespace="market",
+    ),
+}
 
 
 # 板块定义
@@ -78,6 +87,8 @@ MARKET_BOARDS = {
 class StockScreener:
     """Stock screening engine"""
 
+    _cache = CacheManager()
+
     # Field mapping: API field -> DataFrame column
     FIELD_MAPPING = {
         'price': '最新价',
@@ -94,17 +105,14 @@ class StockScreener:
     @classmethod
     async def get_all_stocks_data(cls) -> pd.DataFrame:
         """Get all A-share stocks data (async, non-blocking)"""
+        config = CACHE_CONFIGS["market_snapshot"]
         cache_key = "all_stocks"
-        if cache_key in _stock_data_cache:
-            return _stock_data_cache[cache_key]
 
-        # Use run_sync to avoid blocking the event loop
-        df = await run_sync(_fetch_all_stocks_sync)
+        async def fetch() -> pd.DataFrame:
+            return await run_akshare(_fetch_all_stocks_sync)
 
-        if not df.empty:
-            _stock_data_cache[cache_key] = df
-
-        return df
+        result = await cls._cache.get(cache_key, config, fetch)
+        return result if isinstance(result, pd.DataFrame) else pd.DataFrame()
 
     @classmethod
     def apply_condition(cls, df: pd.DataFrame, condition: Dict[str, Any]) -> pd.DataFrame:

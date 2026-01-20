@@ -223,7 +223,7 @@ async def run_backtest(
     strategy = get_strategy(strategy_name, params)
 
     # Get data
-    df = StockDataFetcher.get_daily_kline(
+    df = await StockDataFetcher.get_daily_kline_async(
         stock_code,
         start_date=start_date,
         end_date=end_date
@@ -233,7 +233,7 @@ async def run_backtest(
         raise ValueError(f"No data found for {stock_code}")
 
     # Get stock info
-    stock_info = StockDataFetcher.get_stock_info(stock_code)
+    stock_info = await StockDataFetcher.get_stock_info_async(stock_code)
 
     # Run backtest
     engine = BacktestEngine(

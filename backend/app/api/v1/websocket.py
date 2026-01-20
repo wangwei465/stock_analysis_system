@@ -1,16 +1,13 @@
 """WebSocket real-time quote and intraday data endpoint"""
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Dict, Set, List, Optional
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
 from app.core.data_fetcher import StockDataFetcher
 
 router = APIRouter()
-
-# 使用单线程池避免 py_mini_racer (V8) 多线程初始化问题
-executor = ThreadPoolExecutor(max_workers=1)
-
 
 class ConnectionManager:
     """Manage WebSocket connections"""
@@ -67,15 +64,12 @@ class ConnectionManager:
         while self._running:
             try:
                 codes = list(self.active_connections.keys())
-                loop = asyncio.get_event_loop()
                 for code in codes:
                     if code not in self.active_connections:
                         continue
 
                     try:
-                        quote = await loop.run_in_executor(
-                            executor, StockDataFetcher.get_realtime_quote, code
-                        )
+                        quote = await StockDataFetcher.get_realtime_quote_async(code)
                         if quote:
                             await self.broadcast(code, quote)
                     except Exception as e:
@@ -145,12 +139,13 @@ class IntradayConnectionManager:
         for conn in dead_connections:
             self.active_connections[code].discard(conn)
 
-    def _get_intraday_data_sync(self, code: str) -> tuple[List[dict], float]:
-        """Get intraday data for a stock (sync version, runs in thread pool)"""
-        quote = StockDataFetcher.get_realtime_quote(code)
-        pre_close = quote['pre_close'] if quote else 0
+    async def _get_intraday_data(self, code: str) -> tuple[List[dict], float]:
+        """Get intraday data for a stock"""
+        quote_task = StockDataFetcher.get_realtime_quote_async(code)
+        intraday_task = StockDataFetcher.get_intraday_data_async(code)
+        quote, df = await asyncio.gather(quote_task, intraday_task)
 
-        df = StockDataFetcher.get_intraday_data(code)
+        pre_close = quote['pre_close'] if quote else 0
         if df.empty:
             return [], pre_close
 
@@ -179,11 +174,6 @@ class IntradayConnectionManager:
             })
 
         return intraday_data, pre_close
-
-    async def _get_intraday_data(self, code: str) -> tuple[List[dict], float]:
-        """Get intraday data for a stock (async wrapper)"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(executor, self._get_intraday_data_sync, code)
 
     async def _broadcast_loop(self):
         """Background task to fetch and broadcast intraday data"""
@@ -238,8 +228,7 @@ async def websocket_quote(websocket: WebSocket, code: str):
     await manager.connect(websocket, code)
     try:
         # Send initial quote
-        loop = asyncio.get_event_loop()
-        quote = await loop.run_in_executor(executor, StockDataFetcher.get_realtime_quote, code)
+        quote = await StockDataFetcher.get_realtime_quote_async(code)
         if quote:
             await websocket.send_json(quote)
 
@@ -290,10 +279,7 @@ async def websocket_intraday(websocket: WebSocket, code: str):
         intraday_data, pre_close = await intraday_manager._get_intraday_data(code)
         print(f"[WebSocket] Got {len(intraday_data)} data points for {code}")
 
-        loop = asyncio.get_event_loop()
-        stock_info = await loop.run_in_executor(
-            executor, StockDataFetcher.get_stock_info, code
-        )
+        stock_info = await StockDataFetcher.get_stock_info_async(code)
 
         await websocket.send_json({
             'type': 'init',

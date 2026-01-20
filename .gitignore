@@ -37,6 +37,7 @@ Thumbs.db
 # Build
 frontend/dist/
 backend/data/*.db
+backend/data/
 
 # Models
 backend/data/models/*.joblib

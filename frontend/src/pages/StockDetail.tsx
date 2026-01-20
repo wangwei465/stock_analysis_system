@@ -77,15 +77,38 @@ export default function StockDetail() {
       setVisibleRange(null)  // 重置可见范围
       try {
         if (chartType === 'kline') {
-          // K线模式：并行加载股票信息、K线数据和指标数据
-          const [stockInfo, klineResponse, indicatorData] = await Promise.all([
+          // K线模式：并行加载，避免单个接口失败导致整体不可用
+          const [stockInfoResult, klineResult, indicatorResult] = await Promise.allSettled([
             getStockInfo(code),
             getKline(code, period),
             getAllIndicators(code, '5,10,20,60', period)
           ])
-          setCurrentStock(stockInfo)
-          setKlineData(klineResponse.data)
-          setIndicators(indicatorData)
+
+          if (stockInfoResult.status === 'fulfilled') {
+            setCurrentStock(stockInfoResult.value)
+          } else {
+            setCurrentStock(null)
+          }
+
+          if (klineResult.status === 'fulfilled') {
+            setKlineData(klineResult.value.data)
+          } else {
+            setKlineData([])
+          }
+
+          if (indicatorResult.status === 'fulfilled') {
+            setIndicators(indicatorResult.value)
+          } else {
+            setIndicators(null)
+          }
+
+          if (
+            stockInfoResult.status === 'rejected' ||
+            klineResult.status === 'rejected' ||
+            indicatorResult.status === 'rejected'
+          ) {
+            message.error('部分数据加载失败，请稍后重试')
+          }
         } else {
           // 分时模式：只需加载股票信息
           const stockInfo = await getStockInfo(code)
