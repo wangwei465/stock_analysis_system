@@ -5,7 +5,8 @@ import {
   FilterOutlined,
   FolderOutlined,
   ExperimentOutlined,
-  RobotOutlined
+  RobotOutlined,
+  UnorderedListOutlined
 } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 
@@ -41,6 +42,11 @@ const menuItems = [
     key: '/prediction',
     icon: <RobotOutlined />,
     label: '智能预测',
+  },
+  {
+    key: '/prediction-records',
+    icon: <UnorderedListOutlined />,
+    label: '预测记录',
   },
 ]
 

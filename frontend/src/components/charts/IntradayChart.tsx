@@ -33,10 +33,15 @@ const formatNumber = (num: number, precision = 2): string => {
   return num.toFixed(precision)
 }
 
-const formatVolume = (vol: number): string => {
-  if (vol >= 100000000) return (vol / 100000000).toFixed(2) + '亿'
-  if (vol >= 10000) return (vol / 10000).toFixed(2) + '万'
-  return vol.toFixed(0)
+const HAND_UNIT = '\u624b'
+const WAN_HAND_UNIT = '\u4e07\u624b'
+const YI_HAND_UNIT = '\u4ebf\u624b'
+
+const formatVolume = (volHands: number): string => {
+  if (volHands === null || volHands === undefined || isNaN(volHands)) return '-'
+  if (volHands >= 100000000) return (volHands / 100000000).toFixed(2) + YI_HAND_UNIT
+  if (volHands >= 10000) return (volHands / 10000).toFixed(2) + WAN_HAND_UNIT
+  return volHands.toFixed(2) + HAND_UNIT
 }
 
 const formatAmount = (amount: number): string => {

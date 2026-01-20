@@ -1,5 +1,6 @@
 """WebSocket real-time quote and intraday data endpoint"""
 import asyncio
+import math
 from datetime import datetime
 from typing import Dict, Set, List, Optional
 
@@ -150,17 +151,23 @@ class IntradayConnectionManager:
             return [], pre_close
 
         intraday_data = []
-        cumulative_amount = 0
-        cumulative_volume = 0
+        cumulative_amount = 0.0
+        cumulative_volume = 0.0
+        raw_total_volume = float(df['volume'].sum())
+        quote_volume = float(quote.get('volume', 0)) if quote else 0.0
+        volume_divisor = 100.0
+        if quote_volume > 0 and raw_total_volume > 0 and not math.isnan(raw_total_volume):
+            if abs(raw_total_volume - quote_volume) < abs(raw_total_volume / 100 - quote_volume):
+                volume_divisor = 1.0
 
         for _, row in df.iterrows():
-            # AKShare 分钟线（stock_zh_a_minute）返回的 volume 字段口径通常为“手”（1 手 = 100 股）。
-            # websocket 推送端与 REST 接口保持一致：统一换算为“股”，便于前端直接展示/计算。
-            volume = int(row['volume']) * 100
-            cumulative_volume += volume
+            raw_volume = float(row['volume'])
+            volume_hands = round(raw_volume / volume_divisor, 2)
+            volume_shares = raw_volume if volume_divisor == 100.0 else raw_volume * 100
+            cumulative_volume += volume_shares
 
-            # Calculate amount: price * volume
-            amount = float(row['close']) * volume
+            # Calculate amount: price * shares
+            amount = float(row['close']) * volume_shares
             cumulative_amount += amount
             avg_price = cumulative_amount / cumulative_volume if cumulative_volume > 0 else float(row['close'])
 
@@ -169,7 +176,7 @@ class IntradayConnectionManager:
                 'time': time_str,
                 'price': round(float(row['close']), 2),
                 'avg_price': round(avg_price, 2),
-                'volume': volume,
+                'volume': volume_hands,
                 'amount': round(amount, 2)
             })
 

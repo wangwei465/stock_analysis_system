@@ -37,6 +37,7 @@ import {
   getSentimentAnalysis,
   SentimentSummary
 } from '../api/ml'
+import { createPredictionRecord } from '../api/predictionRecords'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -77,6 +78,31 @@ export default function Prediction() {
     }
   }
 
+  const safeNumber = (value: number | null | undefined): number | null => {
+    if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) {
+      return null
+    }
+    return value
+  }
+
+  const buildRecord = (predResult: ComprehensivePrediction) => {
+    const now = new Date()
+    return {
+      stock_name: predResult.stock_name,
+      stock_code: predResult.stock_code,
+      forward_days: predResult.forward_days,
+      current_price: safeNumber(predResult.stock_info?.current_price ?? predResult.price_range?.current_price),
+      direction: predResult.direction.direction_label,
+      signal: predResult.signal.signal_label,
+      recommendation: predResult.recommendation.action,
+      expected_price: safeNumber(predResult.price_range?.expected?.price),
+      support: safeNumber(predResult.price_range?.support_resistance?.support),
+      resistance: safeNumber(predResult.price_range?.support_resistance?.resistance),
+      prediction_date: predResult.prediction_date || now.toISOString().slice(0, 10),
+      accuracy: 'unknown',
+    }
+  }
+
   const handlePredict = async () => {
     if (!stockCode) {
       message.warning('请选择股票')
@@ -91,6 +117,12 @@ export default function Prediction() {
       ])
       setPrediction(predResult)
       setSentiment(sentResult)
+      try {
+        await createPredictionRecord(buildRecord(predResult))
+      } catch (recordError) {
+        console.error('Prediction record save error:', recordError)
+        message.warning('预测记录保存失败')
+      }
       message.success('预测完成')
     } catch (error) {
       console.error('Prediction error:', error)
@@ -125,6 +157,7 @@ export default function Prediction() {
     if (direction === -1) return colors.down
     return colors.neutral
   }
+
 
   return (
     <div style={{ padding: 24 }}>
@@ -619,6 +652,7 @@ export default function Prediction() {
           </Paragraph>
         </Card>
       )}
+
     </div>
   )
 }

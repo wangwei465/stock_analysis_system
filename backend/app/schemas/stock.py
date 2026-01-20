@@ -19,7 +19,7 @@ class KlineData(BaseModel):
     high: float
     low: float
     close: float
-    volume: int
+    volume: float  # Volume in hands
     amount: Optional[float] = None  # 成交额
     turnover: Optional[float] = None  # 换手率
 
@@ -100,7 +100,7 @@ class IntradayData(BaseModel):
     time: str  # Time string HH:MM
     price: float
     avg_price: float  # Average price (均价线)
-    volume: int
+    volume: float  # Volume in hands
     amount: float
 
 

@@ -105,7 +105,7 @@ export interface IntradayData {
   time: string
   price: number
   avg_price: number
-  volume: number
+  volume: number // hands
   amount: number
 }
 

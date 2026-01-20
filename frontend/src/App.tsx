@@ -9,6 +9,7 @@ import Screener from './pages/Screener'
 import Portfolio from './pages/Portfolio'
 import Backtest from './pages/Backtest'
 import Prediction from './pages/Prediction'
+import PredictionRecords from './pages/PredictionRecords'
 
 const { Content } = Layout
 
@@ -38,6 +39,7 @@ function App() {
               <Route path="/portfolio" element={<Portfolio />} />
               <Route path="/backtest" element={<Backtest />} />
               <Route path="/prediction" element={<Prediction />} />
+              <Route path="/prediction-records" element={<PredictionRecords />} />
             </Routes>
           </Content>
         </Layout>

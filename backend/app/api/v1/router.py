@@ -9,6 +9,7 @@ from .websocket import router as websocket_router
 from .backtest import router as backtest_router
 from .ml import router as ml_router
 from .cache import router as cache_router
+from .prediction_records import router as prediction_records_router
 
 api_router = APIRouter()
 
@@ -21,3 +22,4 @@ api_router.include_router(websocket_router, prefix="/ws", tags=["websocket"])
 api_router.include_router(backtest_router, prefix="/backtest", tags=["backtest"])
 api_router.include_router(ml_router, prefix="/ml", tags=["ml"])
 api_router.include_router(cache_router, prefix="/cache", tags=["cache"])
+api_router.include_router(prediction_records_router, prefix="/prediction-records", tags=["prediction-records"])
