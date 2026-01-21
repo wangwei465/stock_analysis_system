@@ -6,7 +6,8 @@ import {
   FolderOutlined,
   ExperimentOutlined,
   RobotOutlined,
-  UnorderedListOutlined
+  UnorderedListOutlined,
+  LineChartOutlined
 } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 
@@ -27,6 +28,11 @@ const menuItems = [
     key: '/screener',
     icon: <FilterOutlined />,
     label: '选股器',
+  },
+  {
+    key: '/equity-bond-spread',
+    icon: <LineChartOutlined />,
+    label: '股债利差',
   },
   {
     key: '/portfolio',

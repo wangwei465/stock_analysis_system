@@ -234,9 +234,10 @@ export default function PortfolioPage() {
     if (!selectedPortfolio) return
 
     try {
-      const [code] = values.stock.split('|')
+      const [code, name] = values.stock.split('|')
       await createTransaction(selectedPortfolio, {
         code,
+        name,
         trade_type: values.trade_type,
         quantity: values.quantity,
         price: values.price,
@@ -246,7 +247,7 @@ export default function PortfolioPage() {
       message.success('交易记录添加成功')
       setAddTransactionModalOpen(false)
       transactionForm.resetFields()
-      await loadTransactions(selectedPortfolio)
+      await Promise.all([loadTransactions(selectedPortfolio), loadPerformance(selectedPortfolio)])
     } catch (error) {
       message.error('添加失败')
     }
@@ -258,7 +259,7 @@ export default function PortfolioPage() {
     try {
       await deleteTransaction(selectedPortfolio, transactionId)
       message.success('交易记录已删除')
-      await loadTransactions(selectedPortfolio)
+      await Promise.all([loadTransactions(selectedPortfolio), loadPerformance(selectedPortfolio)])
     } catch (error) {
       message.error('删除失败')
     }
@@ -274,7 +275,7 @@ export default function PortfolioPage() {
       } else {
         message.success(`成功导入 ${result.imported} 条交易记录`)
       }
-      await loadTransactions(selectedPortfolio)
+      await Promise.all([loadTransactions(selectedPortfolio), loadPerformance(selectedPortfolio)])
     } catch (error) {
       message.error('导入失败')
     }

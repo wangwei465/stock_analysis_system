@@ -146,6 +146,7 @@ export interface Transaction {
 
 export interface CreateTransactionRequest {
   code: string
+  name?: string
   trade_type: 'BUY' | 'SELL'
   quantity: number
   price: number

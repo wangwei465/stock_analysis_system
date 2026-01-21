@@ -1,5 +1,5 @@
 """Portfolio management API endpoints"""
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import date
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,117 @@ from app.database import get_session
 from app.models.portfolio import Portfolio, Position, Transaction
 
 router = APIRouter()
+
+async def _get_positions_by_code(
+    session: AsyncSession,
+    portfolio_id: int,
+    code: str,
+) -> List[Position]:
+    result = await session.execute(
+        select(Position)
+        .where(Position.portfolio_id == portfolio_id, Position.code == code)
+        .order_by(Position.id)
+    )
+    return result.scalars().all()
+
+
+async def _consolidate_positions_by_code(
+    session: AsyncSession,
+    portfolio_id: int,
+    code: str,
+) -> Optional[Position]:
+    """
+    Ensure at most one Position row exists for (portfolio_id, code).
+    If multiple rows exist, merge them into the earliest row and delete the rest.
+    """
+    positions = await _get_positions_by_code(session, portfolio_id, code)
+    if not positions:
+        return None
+    if len(positions) == 1:
+        return positions[0]
+
+    primary = positions[0]
+    total_qty = sum(p.quantity for p in positions)
+    total_cost = sum(p.quantity * p.avg_cost for p in positions)
+    primary.quantity = total_qty
+    primary.avg_cost = (total_cost / total_qty) if total_qty > 0 else primary.avg_cost
+
+    # Best-effort preserve metadata
+    for p in positions:
+        if p.name and not primary.name:
+            primary.name = p.name
+        if p.buy_date and (primary.buy_date is None or p.buy_date < primary.buy_date):
+            primary.buy_date = p.buy_date
+
+    for extra in positions[1:]:
+        await session.delete(extra)
+
+    return primary
+
+
+async def _apply_trade_to_position(
+    session: AsyncSession,
+    portfolio_id: int,
+    code: str,
+    trade_type: str,
+    quantity: int,
+    price: float,
+    commission: float,
+    trade_date: date,
+    name: Optional[str] = None,
+) -> None:
+    """
+    Apply a BUY/SELL transaction to positions table so that holdings and
+    transaction records stay in sync.
+    """
+    if quantity <= 0:
+        raise HTTPException(status_code=400, detail="quantity must be > 0")
+    if price <= 0:
+        raise HTTPException(status_code=400, detail="price must be > 0")
+    if commission < 0:
+        raise HTTPException(status_code=400, detail="commission must be >= 0")
+
+    position = await _consolidate_positions_by_code(session, portfolio_id, code)
+
+    if trade_type == "BUY":
+        safe_name = (name or "").strip()
+        if position:
+            total_cost = position.quantity * position.avg_cost + quantity * price + commission
+            total_qty = position.quantity + quantity
+            position.quantity = total_qty
+            position.avg_cost = total_cost / total_qty
+            if safe_name:
+                position.name = safe_name
+            if position.buy_date is None or trade_date < position.buy_date:
+                position.buy_date = trade_date
+        else:
+            if not safe_name:
+                safe_name = code
+            avg_cost = (quantity * price + commission) / quantity
+            session.add(
+                Position(
+                    portfolio_id=portfolio_id,
+                    code=code,
+                    name=safe_name,
+                    quantity=quantity,
+                    avg_cost=avg_cost,
+                    buy_date=trade_date,
+                )
+            )
+        return
+
+    if trade_type == "SELL":
+        if not position:
+            raise HTTPException(status_code=400, detail="Position not found for SELL")
+        if quantity > position.quantity:
+            raise HTTPException(status_code=400, detail="Sell quantity exceeds position quantity")
+
+        position.quantity -= quantity
+        if position.quantity == 0:
+            await session.delete(position)
+        return
+
+    raise HTTPException(status_code=400, detail="trade_type must be BUY or SELL")
 
 
 # Request/Response models
@@ -44,6 +155,7 @@ class PortfolioUpdate(BaseModel):
 
 class TransactionCreate(BaseModel):
     code: str
+    name: Optional[str] = None
     trade_type: str  # BUY or SELL
     quantity: int
     price: float
@@ -455,14 +567,30 @@ async def create_transaction(
     if transaction.trade_type not in ["BUY", "SELL"]:
         raise HTTPException(status_code=400, detail="trade_type must be BUY or SELL")
 
+    trade_date_val = transaction.trade_date or date.today()
+    commission_val = transaction.commission or 0
+
+    # Keep positions in sync
+    await _apply_trade_to_position(
+        session=session,
+        portfolio_id=portfolio_id,
+        code=transaction.code,
+        trade_type=transaction.trade_type,
+        quantity=transaction.quantity,
+        price=transaction.price,
+        commission=commission_val,
+        trade_date=trade_date_val,
+        name=transaction.name,
+    )
+
     db_transaction = Transaction(
         portfolio_id=portfolio_id,
         code=transaction.code,
         trade_type=transaction.trade_type,
         quantity=transaction.quantity,
         price=transaction.price,
-        commission=transaction.commission or 0,
-        trade_date=transaction.trade_date or date.today()
+        commission=commission_val,
+        trade_date=trade_date_val
     )
     session.add(db_transaction)
     await session.commit()
@@ -480,6 +608,43 @@ async def delete_transaction(
     transaction = await session.get(Transaction, transaction_id)
     if not transaction or transaction.portfolio_id != portfolio_id:
         raise HTTPException(status_code=404, detail="Transaction not found")
+
+    # Reverse the impact on positions (best-effort; assumes user is deleting a recent mistaken record)
+    trade_date_val = transaction.trade_date
+    commission_val = transaction.commission or 0
+
+    if transaction.trade_type == "BUY":
+        # Reverse BUY: reduce position qty and re-calc avg_cost by removing this BUY cost basis
+        position = await _consolidate_positions_by_code(session, portfolio_id, transaction.code)
+        if position:
+            new_qty = position.quantity - transaction.quantity
+            if new_qty < 0:
+                raise HTTPException(status_code=400, detail="Cannot delete transaction: position quantity mismatch")
+            if new_qty == 0:
+                await session.delete(position)
+            else:
+                current_cost = position.quantity * position.avg_cost
+                new_cost = current_cost - (transaction.quantity * transaction.price + commission_val)
+                position.quantity = new_qty
+                position.avg_cost = new_cost / new_qty
+
+    elif transaction.trade_type == "SELL":
+        # Reverse SELL: increase position qty; avg_cost unchanged
+        position = await _consolidate_positions_by_code(session, portfolio_id, transaction.code)
+        if position:
+            position.quantity += transaction.quantity
+        else:
+            # No existing position: re-create with unknown avg_cost; use trade price as fallback
+            session.add(
+                Position(
+                    portfolio_id=portfolio_id,
+                    code=transaction.code,
+                    name=transaction.code,
+                    quantity=transaction.quantity,
+                    avg_cost=transaction.price,
+                    buy_date=trade_date_val,
+                )
+            )
 
     await session.delete(transaction)
     await session.commit()
@@ -514,9 +679,39 @@ async def import_transactions(
     imported = 0
     errors = []
 
+    # Load existing positions once and consolidate duplicates per code
+    pos_result = await session.execute(select(Position).where(Position.portfolio_id == portfolio_id).order_by(Position.id))
+    existing_positions = pos_result.scalars().all()
+    positions_map: Dict[str, Position] = {}
+    duplicate_positions: List[Position] = []
+    for p in existing_positions:
+        if p.code in positions_map:
+            duplicate_positions.append(p)
+        else:
+            positions_map[p.code] = p
+
+    # Merge duplicates into primary rows
+    if duplicate_positions:
+        grouped: Dict[str, List[Position]] = {}
+        for p in existing_positions:
+            grouped.setdefault(p.code, []).append(p)
+        for code, plist in grouped.items():
+            if len(plist) <= 1:
+                continue
+            primary = plist[0]
+            total_qty = sum(x.quantity for x in plist)
+            total_cost = sum(x.quantity * x.avg_cost for x in plist)
+            primary.quantity = total_qty
+            primary.avg_cost = (total_cost / total_qty) if total_qty > 0 else primary.avg_cost
+            for extra in plist[1:]:
+                await session.delete(extra)
+        # refresh map after consolidation
+        positions_map = {p.code: p for p in existing_positions if p not in duplicate_positions}
+
     for row_num, row in enumerate(reader, start=2):
         try:
             code = row.get('code', '').strip()
+            name = row.get('name', '').strip() if row.get('name') is not None else ''
             trade_type = row.get('trade_type', '').strip().upper()
             quantity = int(row.get('quantity', 0))
             price = float(row.get('price', 0))
@@ -528,6 +723,23 @@ async def import_transactions(
                 continue
 
             trade_date_val = date.fromisoformat(trade_date_str) if trade_date_str else date.today()
+
+            # Apply to positions incrementally (in CSV order)
+            try:
+                await _apply_trade_to_position(
+                    session=session,
+                    portfolio_id=portfolio_id,
+                    code=code,
+                    trade_type=trade_type,
+                    quantity=quantity,
+                    price=price,
+                    commission=commission,
+                    trade_date=trade_date_val,
+                    name=name or None,
+                )
+            except HTTPException as e:
+                errors.append(f"Row {row_num}: {e.detail}")
+                continue
 
             db_transaction = Transaction(
                 portfolio_id=portfolio_id,
