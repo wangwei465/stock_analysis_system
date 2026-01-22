@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard'
 import StockDetail from './pages/StockDetail'
 import Screener from './pages/Screener'
 import EquityBondSpread from './pages/EquityBondSpread'
+import BuffettIndex from './pages/BuffettIndex'
 import Portfolio from './pages/Portfolio'
 import Backtest from './pages/Backtest'
 import Prediction from './pages/Prediction'
@@ -38,6 +39,7 @@ function App() {
               <Route path="/stock/:code" element={<StockDetail />} />
               <Route path="/screener" element={<Screener />} />
               <Route path="/equity-bond-spread" element={<EquityBondSpread />} />
+              <Route path="/buffett-index" element={<BuffettIndex />} />
               <Route path="/portfolio" element={<Portfolio />} />
               <Route path="/backtest" element={<Backtest />} />
               <Route path="/prediction" element={<Prediction />} />

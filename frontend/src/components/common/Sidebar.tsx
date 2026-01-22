@@ -7,7 +7,8 @@ import {
   ExperimentOutlined,
   RobotOutlined,
   UnorderedListOutlined,
-  LineChartOutlined
+  LineChartOutlined,
+  FundOutlined
 } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 
@@ -33,6 +34,11 @@ const menuItems = [
     key: '/equity-bond-spread',
     icon: <LineChartOutlined />,
     label: '股债利差',
+  },
+  {
+    key: '/buffett-index',
+    icon: <FundOutlined />,
+    label: '巴菲特指标',
   },
   {
     key: '/portfolio',

@@ -1,24 +1,19 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import React, { useEffect, useState, useRef, useCallback } from 'react'
 import { Card, Spin, Alert, Statistic, Row, Col, Typography, Divider, Tag, Progress } from 'antd'
 import { LineChartOutlined, RiseOutlined, FallOutlined, CheckCircleOutlined, WarningOutlined, CloseCircleOutlined } from '@ant-design/icons'
 import { createChart, IChartApi, ISeriesApi, LineData } from 'lightweight-charts'
-import { getEquityBondSpreadData, getEquityBondSpreadStats, EquityBondSpreadData, EquityBondSpreadStats } from '../api/equityBondSpread'
+import { getBuffettIndexData, getBuffettIndexStats, BuffettIndexData, BuffettIndexStats } from '../api/buffettIndex'
 
 const { Title, Paragraph, Text } = Typography
 
 // 生成投资建议
-function getInvestmentAdvice(stats: EquityBondSpreadStats, latestData: EquityBondSpreadData | null) {
+function getInvestmentAdvice(stats: BuffettIndexStats, latestData: BuffettIndexData | null) {
   if (!stats || !latestData) return null
 
-  const current = stats.equity_bond_spread.current
-  const avg = stats.equity_bond_spread.avg
-  const ma = stats.equity_bond_spread_ma.current
-  const stdUpper = latestData.股债利差标准差上界
-  const stdLower = latestData.股债利差标准差下界
-
-  // 计算历史分位数（简化计算）
-  const range = stats.equity_bond_spread.max - stats.equity_bond_spread.min
-  const percentile = ((current - stats.equity_bond_spread.min) / range) * 100
+  const current = stats.buffett_ratio.current
+  const avg = stats.buffett_ratio.avg
+  const percentile10y = stats.percentile_10y.current
+  const percentileAll = stats.percentile_all.current
 
   // 判断信号
   let signal: 'bullish' | 'neutral' | 'bearish'
@@ -26,30 +21,25 @@ function getInvestmentAdvice(stats: EquityBondSpreadStats, latestData: EquityBon
   let signalColor: string
   let icon: React.ReactNode
 
-  if (current > stdUpper) {
+  if (percentileAll < 0.3) {
     signal = 'bullish'
     signalText = '积极看多'
     signalColor = '#10b981'
     icon = <CheckCircleOutlined />
-  } else if (current < stdLower) {
+  } else if (percentileAll > 0.7) {
     signal = 'bearish'
     signalText = '谨慎观望'
     signalColor = '#ef4444'
     icon = <CloseCircleOutlined />
-  } else if (current > ma) {
+  } else if (percentileAll < 0.5) {
     signal = 'bullish'
     signalText = '偏多'
     signalColor = '#22c55e'
     icon = <CheckCircleOutlined />
-  } else if (current > avg) {
-    signal = 'neutral'
-    signalText = '中性偏多'
-    signalColor = '#f59e0b'
-    icon = <WarningOutlined />
   } else {
     signal = 'neutral'
-    signalText = '中性偏空'
-    signalColor = '#f97316'
+    signalText = '中性'
+    signalColor = '#f59e0b'
     icon = <WarningOutlined />
   }
 
@@ -58,18 +48,18 @@ function getInvestmentAdvice(stats: EquityBondSpreadStats, latestData: EquityBon
   let bondAlloc: string
   let cashAlloc: string
 
-  if (signal === 'bullish' && current > stdUpper) {
+  if (percentileAll < 0.3) {
     stockAlloc = '70-80%'
     bondAlloc = '15-25%'
     cashAlloc = '5-10%'
-  } else if (signal === 'bullish') {
-    stockAlloc = '60-70%'
-    bondAlloc = '25-35%'
-    cashAlloc = '5-10%'
-  } else if (signal === 'bearish') {
+  } else if (percentileAll > 0.7) {
     stockAlloc = '30-40%'
     bondAlloc = '40-50%'
     cashAlloc = '15-20%'
+  } else if (percentileAll < 0.5) {
+    stockAlloc = '60-70%'
+    bondAlloc = '25-35%'
+    cashAlloc = '5-10%'
   } else {
     stockAlloc = '50-60%'
     bondAlloc = '30-40%'
@@ -81,17 +71,14 @@ function getInvestmentAdvice(stats: EquityBondSpreadStats, latestData: EquityBon
     signalText,
     signalColor,
     icon,
-    percentile,
     current,
     avg,
-    ma,
-    stdUpper,
-    stdLower,
+    percentile10y,
+    percentileAll,
     stockAlloc,
     bondAlloc,
     cashAlloc,
-    aboveAvg: current > avg,
-    aboveMa: current > ma,
+    belowAvg: current < avg,
   }
 }
 
@@ -104,18 +91,15 @@ interface LegendItem {
 }
 
 const initialLegendItems: LegendItem[] = [
-  { key: 'ebs', label: '股债利差', color: '#3b82f6', visible: true },
-  { key: 'index', label: '指数', color: '#ef4444', visible: true },
-  { key: 'ebsMa', label: '股债利差均线', color: '#f59e0b', visible: true },
-  { key: 'stdUpper', label: '股债利差标准差 × 2', color: '#10b981', visible: true },
-  { key: 'stdLower', label: '-股债利差标准差 × 2', color: '#8b5cf6', visible: true },
+  { key: 'index', label: '沪深300', color: '#ef4444', visible: true },
+  { key: 'ratio', label: '总市值/GDP', color: '#3b82f6', visible: true },
 ]
 
-export default function EquityBondSpread() {
+export default function BuffettIndex() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [data, setData] = useState<EquityBondSpreadData[]>([])
-  const [stats, setStats] = useState<EquityBondSpreadStats | null>(null)
+  const [data, setData] = useState<BuffettIndexData[]>([])
+  const [stats, setStats] = useState<BuffettIndexStats | null>(null)
   const [legendItems, setLegendItems] = useState<LegendItem[]>(initialLegendItems)
   const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; date: string; values: { label: string; value: string; color: string }[] }>({
     visible: false, x: 0, y: 0, date: '', values: []
@@ -123,7 +107,7 @@ export default function EquityBondSpread() {
 
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
-  const seriesRef = useRef<Record<string, ISeriesApi<'Line'>>>({})
+  const seriesRef = useRef<Record<string, ISeriesApi<'Line'> | ISeriesApi<'Area'>>>({})
 
   // 加载数据
   useEffect(() => {
@@ -132,15 +116,15 @@ export default function EquityBondSpread() {
         setLoading(true)
         setError(null)
 
-        const [spreadData, spreadStats] = await Promise.all([
-          getEquityBondSpreadData(),
-          getEquityBondSpreadStats()
+        const [indexData, indexStats] = await Promise.all([
+          getBuffettIndexData(),
+          getBuffettIndexStats()
         ])
 
-        setData(spreadData)
-        setStats(spreadStats)
+        setData(indexData)
+        setStats(indexStats)
       } catch (err) {
-        console.error('加载股债利差数据失败:', err)
+        console.error('加载巴菲特指标数据失败:', err)
         setError(err instanceof Error ? err.message : '加载数据失败')
       } finally {
         setLoading(false)
@@ -171,7 +155,6 @@ export default function EquityBondSpread() {
 
     const chartContainer = chartContainerRef.current
 
-    // 创建新图表（配置双Y轴）
     const newChart = createChart(chartContainer, {
       width: chartContainer.clientWidth,
       height: 500,
@@ -197,12 +180,8 @@ export default function EquityBondSpread() {
       },
       crosshair: {
         mode: 1,
-        vertLine: {
-          labelVisible: true,
-        },
-        horzLine: {
-          labelVisible: true,
-        },
+        vertLine: { labelVisible: true },
+        horzLine: { labelVisible: true },
       },
       localization: {
         dateFormat: 'yyyy-MM-dd',
@@ -211,90 +190,44 @@ export default function EquityBondSpread() {
 
     chartRef.current = newChart
 
-    // 创建股债利差线（左Y轴）
-    const ebsSeries = newChart.addLineSeries({
-      color: '#3b82f6',
-      lineWidth: 2,
-      priceScaleId: 'left',
-    })
-
-    // 创建股债利差均线（左Y轴）
-    const ebsMaSeries = newChart.addLineSeries({
-      color: '#f59e0b',
-      lineWidth: 2,
-      priceScaleId: 'left',
-    })
-
-    // 创建标准差上界（左Y轴）
-    const stdUpperSeries = newChart.addLineSeries({
-      color: '#10b981',
-      lineWidth: 2,
-      priceScaleId: 'left',
-    })
-
-    // 创建标准差下界（左Y轴）
-    const stdLowerSeries = newChart.addLineSeries({
-      color: '#8b5cf6',
-      lineWidth: 2,
-      priceScaleId: 'left',
-    })
-
-    // 创建指数线（右Y轴）
+    // 创建沪深300线（左Y轴）
     const indexSeries = newChart.addLineSeries({
       color: '#ef4444',
+      lineWidth: 2,
+      priceScaleId: 'left',
+    })
+
+    // 创建总市值/GDP面积图（右Y轴）
+    const ratioSeries = newChart.addAreaSeries({
+      lineColor: '#3b82f6',
+      topColor: 'rgba(59, 130, 246, 0.4)',
+      bottomColor: 'rgba(59, 130, 246, 0.05)',
       lineWidth: 2,
       priceScaleId: 'right',
     })
 
-    // 保存series引用
     seriesRef.current = {
-      ebs: ebsSeries,
-      ebsMa: ebsMaSeries,
-      stdUpper: stdUpperSeries,
-      stdLower: stdLowerSeries,
       index: indexSeries,
+      ratio: ratioSeries,
     }
 
     // 准备数据
-    const ebsData: LineData[] = data.map(item => ({
-      time: item.日期,
-      value: item.股债利差,
-    }))
-
-    const ebsMaData: LineData[] = data.map(item => ({
-      time: item.日期,
-      value: item.股债利差均线,
-    }))
-
-    const stdUpperData: LineData[] = data
-      .filter(item => item.股债利差标准差上界 !== null)
-      .map(item => ({
-        time: item.日期,
-        value: item.股债利差标准差上界!,
-      }))
-
-    const stdLowerData: LineData[] = data
-      .filter(item => item.股债利差标准差下界 !== null)
-      .map(item => ({
-        time: item.日期,
-        value: item.股债利差标准差下界!,
-      }))
-
     const indexData: LineData[] = data.map(item => ({
       time: item.日期,
-      value: item.沪深300指数,
+      value: item.收盘价,
     }))
 
-    ebsSeries.setData(ebsData)
-    ebsMaSeries.setData(ebsMaData)
-    stdUpperSeries.setData(stdUpperData)
-    stdLowerSeries.setData(stdLowerData)
-    indexSeries.setData(indexData)
+    const ratioData: LineData[] = data.map(item => ({
+      time: item.日期,
+      value: item.总市值GDP比,
+    }))
 
-    // 自动缩放
+    indexSeries.setData(indexData)
+    ratioSeries.setData(ratioData)
+
     newChart.timeScale().fitContent()
 
-    // 订阅十字线移动事件，显示tooltip
+    // 订阅十字线移动事件
     newChart.subscribeCrosshairMove((param) => {
       if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
         setTooltip(prev => ({ ...prev, visible: false }))
@@ -304,39 +237,25 @@ export default function EquityBondSpread() {
       const dateStr = param.time as string
       const values: { label: string; value: string; color: string }[] = []
 
-      const ebsValue = param.seriesData.get(ebsSeries)
       const indexValue = param.seriesData.get(indexSeries)
-      const ebsMaValue = param.seriesData.get(ebsMaSeries)
-      const stdUpperValue = param.seriesData.get(stdUpperSeries)
-      const stdLowerValue = param.seriesData.get(stdLowerSeries)
+      const ratioValue = param.seriesData.get(ratioSeries)
 
-      if (ebsValue && 'value' in ebsValue) {
-        values.push({ label: '股债利差', value: ebsValue.value.toFixed(6), color: '#3b82f6' })
-      }
       if (indexValue && 'value' in indexValue) {
-        values.push({ label: '指数', value: indexValue.value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }), color: '#ef4444' })
+        values.push({ label: '沪深300', value: indexValue.value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }), color: '#ef4444' })
       }
-      if (ebsMaValue && 'value' in ebsMaValue) {
-        values.push({ label: '股债利差均线', value: ebsMaValue.value.toFixed(6), color: '#f59e0b' })
-      }
-      if (stdUpperValue && 'value' in stdUpperValue) {
-        values.push({ label: '股债利差标准差 × 2', value: stdUpperValue.value.toFixed(6), color: '#10b981' })
-      }
-      if (stdLowerValue && 'value' in stdLowerValue) {
-        values.push({ label: '-股债利差标准差 × 2', value: stdLowerValue.value.toFixed(6), color: '#8b5cf6' })
+      if (ratioValue && 'value' in ratioValue) {
+        values.push({ label: '总市值/GDP', value: (ratioValue.value * 100).toFixed(2) + '%', color: '#3b82f6' })
       }
 
       const containerRect = chartContainer.getBoundingClientRect()
       let tooltipX = param.point.x + 15
       let tooltipY = param.point.y + 15
 
-      // 防止tooltip超出右边界
-      if (tooltipX + 220 > containerRect.width) {
-        tooltipX = param.point.x - 235
+      if (tooltipX + 200 > containerRect.width) {
+        tooltipX = param.point.x - 215
       }
-      // 防止tooltip超出下边界
-      if (tooltipY + 180 > containerRect.height) {
-        tooltipY = param.point.y - 195
+      if (tooltipY + 120 > containerRect.height) {
+        tooltipY = param.point.y - 135
       }
 
       setTooltip({
@@ -348,7 +267,7 @@ export default function EquityBondSpread() {
       })
     })
 
-    // 使用 ResizeObserver 监听容器大小变化
+    // ResizeObserver
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width } = entry.contentRect
@@ -371,7 +290,7 @@ export default function EquityBondSpread() {
   if (loading) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <Spin size="large" tip="加载股债利差数据中..." />
+        <Spin size="large" tip="加载巴菲特指标数据中..." />
       </div>
     )
   }
@@ -379,12 +298,7 @@ export default function EquityBondSpread() {
   if (error) {
     return (
       <div style={{ padding: 24 }}>
-        <Alert
-          message="加载失败"
-          description={error}
-          type="error"
-          showIcon
-        />
+        <Alert message="加载失败" description={error} type="error" showIcon />
       </div>
     )
   }
@@ -392,7 +306,7 @@ export default function EquityBondSpread() {
   return (
     <div style={{ padding: 24 }}>
       <Title level={2}>
-        <LineChartOutlined /> 股债利差
+        <LineChartOutlined /> 巴菲特指标（总市值/GDP）
       </Title>
 
       {/* 统计卡片 */}
@@ -401,9 +315,9 @@ export default function EquityBondSpread() {
           <Col xs={24} sm={12} md={6}>
             <Card>
               <Statistic
-                title="当前股债利差"
-                value={stats.equity_bond_spread.current}
-                precision={4}
+                title="总市值/GDP"
+                value={(stats.buffett_ratio.current * 100).toFixed(2)}
+                suffix="%"
                 valueStyle={{ color: '#3b82f6' }}
                 prefix={<LineChartOutlined />}
               />
@@ -412,9 +326,9 @@ export default function EquityBondSpread() {
           <Col xs={24} sm={12} md={6}>
             <Card>
               <Statistic
-                title="当前均线"
-                value={stats.equity_bond_spread_ma.current}
-                precision={4}
+                title="近十年分位"
+                value={(stats.percentile_10y.current * 100).toFixed(2)}
+                suffix="%"
                 valueStyle={{ color: '#f59e0b' }}
                 prefix={<LineChartOutlined />}
               />
@@ -423,10 +337,9 @@ export default function EquityBondSpread() {
           <Col xs={24} sm={12} md={6}>
             <Card>
               <Statistic
-                title="历史最高"
-                value={stats.equity_bond_spread.max}
-                precision={4}
-                valueStyle={{ color: '#ef4444' }}
+                title="总市值（万亿）"
+                value={(stats.market_cap.current / 10000).toFixed(2)}
+                valueStyle={{ color: '#10b981' }}
                 prefix={<RiseOutlined />}
               />
             </Card>
@@ -434,10 +347,9 @@ export default function EquityBondSpread() {
           <Col xs={24} sm={12} md={6}>
             <Card>
               <Statistic
-                title="历史最低"
-                value={stats.equity_bond_spread.min}
-                precision={4}
-                valueStyle={{ color: '#10b981' }}
+                title="GDP（万亿）"
+                value={(stats.gdp.current / 10000).toFixed(2)}
+                valueStyle={{ color: '#8b5cf6' }}
                 prefix={<FallOutlined />}
               />
             </Card>
@@ -492,7 +404,7 @@ export default function EquityBondSpread() {
               padding: '10px 14px',
               pointerEvents: 'none',
               zIndex: 100,
-              minWidth: 200,
+              minWidth: 180,
             }}>
               <div style={{ color: '#fff', fontWeight: 600, marginBottom: 8, fontSize: 14, textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>
                 {tooltip.date}
@@ -537,7 +449,6 @@ export default function EquityBondSpread() {
             }
           >
             <Row gutter={[24, 24]}>
-              {/* 左侧：核心指标 */}
               <Col xs={24} md={12}>
                 <div style={{ marginBottom: 16 }}>
                   <Text strong style={{ fontSize: 16 }}>核心指标</Text>
@@ -545,36 +456,37 @@ export default function EquityBondSpread() {
                 <Row gutter={[16, 16]}>
                   <Col span={12}>
                     <Statistic
-                      title="当前股债利差"
-                      value={advice.current}
-                      precision={4}
+                      title="总市值/GDP"
+                      value={(advice.current * 100).toFixed(2)}
+                      suffix="%"
                       valueStyle={{ color: '#3b82f6', fontSize: 20 }}
                     />
                   </Col>
                   <Col span={12}>
                     <Statistic
-                      title="均线"
-                      value={advice.ma}
-                      precision={4}
-                      valueStyle={{ color: '#f59e0b', fontSize: 20 }}
-                    />
-                  </Col>
-                  <Col span={12}>
-                    <Statistic
                       title="历史平均"
-                      value={advice.avg}
-                      precision={4}
+                      value={(advice.avg * 100).toFixed(2)}
+                      suffix="%"
                       valueStyle={{ color: '#94a3b8', fontSize: 20 }}
                     />
                   </Col>
                   <Col span={12}>
                     <div>
-                      <Text type="secondary" style={{ fontSize: 12 }}>历史分位</Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>近十年分位</Text>
                       <Progress
-                        percent={Math.round(advice.percentile)}
+                        percent={Math.round(advice.percentile10y * 100)}
                         size="small"
-                        strokeColor={advice.percentile > 50 ? '#10b981' : '#f59e0b'}
-                        format={p => `${p}%`}
+                        strokeColor={advice.percentile10y < 0.5 ? '#10b981' : '#f59e0b'}
+                      />
+                    </div>
+                  </Col>
+                  <Col span={12}>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>总历史分位</Text>
+                      <Progress
+                        percent={Math.round(advice.percentileAll * 100)}
+                        size="small"
+                        strokeColor={advice.percentileAll < 0.5 ? '#10b981' : '#f59e0b'}
                       />
                     </div>
                   </Col>
@@ -583,20 +495,16 @@ export default function EquityBondSpread() {
                 <div>
                   <Text type="secondary">位置分析：</Text>
                   <div style={{ marginTop: 8 }}>
-                    <Tag color={advice.aboveAvg ? 'green' : 'orange'}>
-                      {advice.aboveAvg ? '✓ 高于历史平均' : '✗ 低于历史平均'}
+                    <Tag color={advice.belowAvg ? 'green' : 'orange'}>
+                      {advice.belowAvg ? '✓ 低于历史平均' : '✗ 高于历史平均'}
                     </Tag>
-                    <Tag color={advice.aboveMa ? 'green' : 'orange'}>
-                      {advice.aboveMa ? '✓ 高于均线' : '✗ 低于均线'}
-                    </Tag>
-                    <Tag color={advice.current > advice.stdLower ? 'green' : 'red'}>
-                      {advice.current > advice.stdLower ? '✓ 高于下界' : '✗ 低于下界'}
+                    <Tag color={advice.percentileAll < 0.5 ? 'green' : 'orange'}>
+                      {advice.percentileAll < 0.5 ? '✓ 低于中位数' : '✗ 高于中位数'}
                     </Tag>
                   </div>
                 </div>
               </Col>
 
-              {/* 右侧：配置建议 */}
               <Col xs={24} md={12}>
                 <div style={{ marginBottom: 16 }}>
                   <Text strong style={{ fontSize: 16 }}>配置建议</Text>
@@ -631,20 +539,17 @@ export default function EquityBondSpread() {
                 <div>
                   <Text type="secondary">操作建议：</Text>
                   <Paragraph style={{ marginTop: 8, marginBottom: 0 }}>
-                    {advice.signal === 'bullish' && advice.current > advice.stdUpper && (
-                      <>股债利差处于历史高位，股票相对债券极具吸引力，可积极配置股票资产。</>
+                    {advice.percentileAll < 0.3 && (
+                      <>巴菲特指标处于历史低位，市场估值较低，是较好的买入时机，可积极配置股票资产。</>
                     )}
-                    {advice.signal === 'bullish' && advice.current <= advice.stdUpper && (
-                      <>股债利差高于均线，股票相对债券有吸引力，可适当增加股票配置。</>
+                    {advice.percentileAll >= 0.3 && advice.percentileAll < 0.5 && (
+                      <>巴菲特指标低于中位数，市场估值合理偏低，可适当增加股票配置。</>
                     )}
-                    {advice.signal === 'neutral' && advice.aboveAvg && (
-                      <>股债利差高于历史平均但低于均线，建议维持均衡配置，关注趋势变化。</>
+                    {advice.percentileAll >= 0.5 && advice.percentileAll < 0.7 && (
+                      <>巴菲特指标处于中等水平，市场估值合理，建议维持均衡配置。</>
                     )}
-                    {advice.signal === 'neutral' && !advice.aboveAvg && (
-                      <>股债利差低于历史平均，市场估值偏高，建议谨慎，可适当增加债券配置。</>
-                    )}
-                    {advice.signal === 'bearish' && (
-                      <>股债利差处于历史低位，股票估值偏高，建议降低股票仓位，增加债券和现金配置。</>
+                    {advice.percentileAll >= 0.7 && (
+                      <>巴菲特指标处于历史高位，市场估值偏高，建议降低股票仓位，增加债券和现金配置。</>
                     )}
                   </Paragraph>
                 </div>
@@ -652,70 +557,53 @@ export default function EquityBondSpread() {
             </Row>
             <Divider style={{ margin: '16px 0' }} />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              风险提示：以上建议仅供参考，不构成投资建议。股债利差是中长期指标，投资决策需综合考虑多重因素。
+              风险提示：以上建议仅供参考，不构成投资建议。巴菲特指标是中长期指标，投资决策需综合考虑多重因素。
             </Text>
           </Card>
         )
       })()}
 
-      {/* 使用说明和投资建议 */}
-      <Card title="股债利差说明" style={{ marginBottom: 24 }}>
+      {/* 使用说明 */}
+      <Card title="巴菲特指标说明" style={{ marginBottom: 24 }}>
         <Typography>
-          <Title level={4}>什么是股债利差？</Title>
+          <Title level={4}>什么是巴菲特指标？</Title>
           <Paragraph>
-            股债利差（Equity Bond Spread，EBS）是指股票市场的盈利收益率与债券市场收益率之间的差值。
-            它反映了股票相对于债券的投资吸引力，是衡量市场估值水平的重要指标。
+            巴菲特指标（Buffett Indicator）是由沃伦·巴菲特提出的一个衡量股市整体估值水平的指标，
+            计算方法为：股票总市值 / GDP。巴菲特曾称这是"在任何时候衡量股市估值的最佳单一指标"。
           </Paragraph>
 
           <Title level={4}>计算方法</Title>
           <Paragraph>
-            股债利差 = 沪深300指数盈利收益率 - 10年期国债收益率
+            巴菲特指标 = A股总市值 / 上年度GDP
             <br />
-            其中，盈利收益率 = 1 / 市盈率（PE）
+            其中，总市值 = A股收盘价 × 已发行股票总股本（A股+B股+H股）
           </Paragraph>
 
           <Divider />
 
-          <Title level={4}>如何解读股债利差？</Title>
+          <Title level={4}>如何解读巴菲特指标？</Title>
           <Paragraph>
-            <Text strong>1. 股债利差越高，股票相对债券越有吸引力</Text>
+            <Text strong>1. 指标越低，股市越被低估</Text>
             <br />
-            当股债利差处于历史高位时，说明股票市场估值较低，相对债券更具投资价值。
+            当巴菲特指标处于历史低位时，说明股市整体估值较低，可能是较好的买入时机。
           </Paragraph>
 
           <Paragraph>
-            <Text strong>2. 股债利差越低，债券相对股票越有吸引力</Text>
+            <Text strong>2. 指标越高，股市越被高估</Text>
             <br />
-            当股债利差处于历史低位时，说明股票市场估值较高，相对债券投资价值降低。
+            当巴菲特指标处于历史高位时，说明股市整体估值较高，投资风险增大。
           </Paragraph>
 
           <Paragraph>
-            <Text strong>3. 观察股债利差与均线的关系</Text>
+            <Text strong>3. 参考分位数判断</Text>
             <br />
-            • 当股债利差上穿均线时，可能是买入信号
+            • 分位数 &lt; 30%：市场低估，可积极买入
             <br />
-            • 当股债利差下穿均线时，可能是卖出信号
-          </Paragraph>
-
-          <Divider />
-
-          <Title level={4}>投资建议</Title>
-          <Paragraph>
-            <Text type="success" strong>✓ 股债利差 &gt; 历史平均值 + 1倍标准差</Text>
+            • 分位数 30%-50%：市场合理偏低，可适当买入
             <br />
-            市场估值处于低位，股票投资价值较高，可考虑增加股票配置。
-          </Paragraph>
-
-          <Paragraph>
-            <Text type="warning" strong>⚠ 历史平均值 - 1倍标准差 &lt; 股债利差 &lt; 历史平均值 + 1倍标准差</Text>
+            • 分位数 50%-70%：市场合理，保持观望
             <br />
-            市场估值处于合理区间，建议保持均衡配置，关注市场变化。
-          </Paragraph>
-
-          <Paragraph>
-            <Text type="danger" strong>✗ 股债利差 &lt; 历史平均值 - 1倍标准差</Text>
-            <br />
-            市场估值处于高位，股票投资风险较大，建议降低股票配置或转向债券。
+            • 分位数 &gt; 70%：市场高估，谨慎投资
           </Paragraph>
 
           <Divider />
@@ -723,13 +611,13 @@ export default function EquityBondSpread() {
           <Title level={4}>注意事项</Title>
           <Paragraph>
             <Text type="secondary">
-              1. 股债利差是一个相对指标，需要结合历史数据和市场环境综合判断
+              1. 巴菲特指标是一个宏观指标，主要用于判断市场整体估值水平
               <br />
-              2. 该指标主要适用于中长期投资决策，不适合短期交易
+              2. 该指标适用于中长期投资决策，不适合短期交易
               <br />
-              3. 投资决策应综合考虑多个指标，不应单独依赖股债利差
+              3. 中国股市与美国股市结构不同，指标的绝对值参考意义有限，应更关注相对位置
               <br />
-              4. 市场环境变化可能导致历史规律失效，需要持续关注和调整策略
+              4. 投资决策应综合考虑多个指标，不应单独依赖巴菲特指标
             </Text>
           </Paragraph>
         </Typography>
