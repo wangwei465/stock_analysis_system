@@ -28,7 +28,8 @@ import {
   EditOutlined,
   ArrowUpOutlined,
   ArrowDownOutlined,
-  UploadOutlined
+  UploadOutlined,
+  DownloadOutlined
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -37,16 +38,20 @@ import {
   updatePortfolio,
   deletePortfolio,
   addPosition,
+  updatePosition,
   deletePosition,
   getPortfolioPerformance,
   getTransactions,
   createTransaction,
   deleteTransaction,
+  batchDeleteTransactions,
   importTransactions,
+  getExportTransactionsUrl,
   Portfolio,
   PositionDetail,
   PortfolioPerformance,
-  Transaction
+  Transaction,
+  TradeType
 } from '../api/portfolio'
 import { searchStocks } from '../api/stocks'
 
@@ -62,10 +67,13 @@ export default function PortfolioPage() {
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [editingPortfolio, setEditingPortfolio] = useState<Portfolio | null>(null)
   const [addPositionModalOpen, setAddPositionModalOpen] = useState(false)
+  const [editPositionModalOpen, setEditPositionModalOpen] = useState(false)
+  const [editingPosition, setEditingPosition] = useState<PositionDetail | null>(null)
   const [stockOptions, setStockOptions] = useState<{ value: string; label: string }[]>([])
   const [form] = Form.useForm()
   const [editForm] = Form.useForm()
   const [positionForm] = Form.useForm()
+  const [editPositionForm] = Form.useForm()
   const [transactionForm] = Form.useForm()
 
   // Transaction states
@@ -73,6 +81,8 @@ export default function PortfolioPage() {
   const [transactionsLoading, setTransactionsLoading] = useState(false)
   const [addTransactionModalOpen, setAddTransactionModalOpen] = useState(false)
   const [activeTab, setActiveTab] = useState('positions')
+  const [selectedTradeType, setSelectedTradeType] = useState<TradeType>('BUY')
+  const [selectedTransactionIds, setSelectedTransactionIds] = useState<number[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Load portfolios
@@ -230,23 +240,52 @@ export default function PortfolioPage() {
     }
   }
 
+  const handleEditPosition = (position: PositionDetail) => {
+    setEditingPosition(position)
+    editPositionForm.setFieldsValue({
+      quantity: position.quantity,
+      avg_cost: position.avg_cost
+    })
+    setEditPositionModalOpen(true)
+  }
+
+  const handleUpdatePosition = async (values: any) => {
+    if (!selectedPortfolio || !editingPosition) return
+
+    try {
+      await updatePosition(selectedPortfolio, editingPosition.id, {
+        quantity: values.quantity,
+        avg_cost: values.avg_cost
+      })
+      message.success('持仓更新成功')
+      setEditPositionModalOpen(false)
+      setEditingPosition(null)
+      editPositionForm.resetFields()
+      await loadPerformance(selectedPortfolio)
+    } catch (error) {
+      message.error('更新失败')
+    }
+  }
+
   const handleAddTransaction = async (values: any) => {
     if (!selectedPortfolio) return
 
     try {
       const [code, name] = values.stock.split('|')
+      const isBuySell = ['BUY', 'SELL'].includes(values.trade_type)
       await createTransaction(selectedPortfolio, {
         code,
         name,
         trade_type: values.trade_type,
-        quantity: values.quantity,
-        price: values.price,
+        quantity: isBuySell ? values.quantity : undefined,
+        price: isBuySell ? values.price : values.amount,
         commission: values.commission || 0,
         trade_date: values.trade_date?.format('YYYY-MM-DD')
       })
       message.success('交易记录添加成功')
       setAddTransactionModalOpen(false)
       transactionForm.resetFields()
+      setSelectedTradeType('BUY')
       await Promise.all([loadTransactions(selectedPortfolio), loadPerformance(selectedPortfolio)])
     } catch (error) {
       message.error('添加失败')
@@ -259,9 +298,23 @@ export default function PortfolioPage() {
     try {
       await deleteTransaction(selectedPortfolio, transactionId)
       message.success('交易记录已删除')
+      setSelectedTransactionIds(ids => ids.filter(id => id !== transactionId))
       await Promise.all([loadTransactions(selectedPortfolio), loadPerformance(selectedPortfolio)])
     } catch (error) {
       message.error('删除失败')
+    }
+  }
+
+  const handleBatchDeleteTransactions = async () => {
+    if (!selectedPortfolio || selectedTransactionIds.length === 0) return
+
+    try {
+      const result = await batchDeleteTransactions(selectedPortfolio, selectedTransactionIds)
+      message.success(`成功删除 ${result.deleted} 条交易记录`)
+      setSelectedTransactionIds([])
+      await Promise.all([loadTransactions(selectedPortfolio), loadPerformance(selectedPortfolio)])
+    } catch (error) {
+      message.error('批量删除失败')
     }
   }
 
@@ -359,14 +412,21 @@ export default function PortfolioPage() {
     {
       title: '操作',
       key: 'action',
-      width: 60,
+      width: 100,
       render: (_: any, record: PositionDetail) => (
-        <Popconfirm
-          title="确定删除该持仓？"
-          onConfirm={() => handleDeletePosition(record.id)}
-        >
-          <Button type="text" danger icon={<DeleteOutlined />} />
-        </Popconfirm>
+        <Space size="small">
+          <Button
+            type="text"
+            icon={<EditOutlined />}
+            onClick={() => handleEditPosition(record)}
+          />
+          <Popconfirm
+            title="确定删除该持仓？"
+            onConfirm={() => handleDeletePosition(record.id)}
+          >
+            <Button type="text" danger icon={<DeleteOutlined />} />
+          </Popconfirm>
+        </Space>
       )
     }
   ]
@@ -568,6 +628,22 @@ export default function PortfolioPage() {
                               >
                                 导入CSV
                               </Button>
+                              <Button
+                                icon={<DownloadOutlined />}
+                                onClick={() => window.open(getExportTransactionsUrl(selectedPortfolio), '_blank')}
+                              >
+                                导出CSV
+                              </Button>
+                              {selectedTransactionIds.length > 0 && (
+                                <Popconfirm
+                                  title={`确定删除选中的 ${selectedTransactionIds.length} 条交易记录？`}
+                                  onConfirm={handleBatchDeleteTransactions}
+                                >
+                                  <Button danger icon={<DeleteOutlined />}>
+                                    批量删除 ({selectedTransactionIds.length})
+                                  </Button>
+                                </Popconfirm>
+                              )}
                             </Space>
                           </div>
                           <Table
@@ -590,32 +666,46 @@ export default function PortfolioPage() {
                                 dataIndex: 'trade_type',
                                 key: 'trade_type',
                                 width: 80,
-                                render: (v: string) => (
-                                  <Tag color={v === 'BUY' ? 'red' : 'green'}>
-                                    {v === 'BUY' ? '买入' : '卖出'}
-                                  </Tag>
-                                )
+                                render: (v: string) => {
+                                  const typeMap: Record<string, { color: string; label: string }> = {
+                                    BUY: { color: 'red', label: '买入' },
+                                    SELL: { color: 'green', label: '卖出' },
+                                    DIVIDEND: { color: 'gold', label: '分红' },
+                                    TAX: { color: 'orange', label: '税补缴' }
+                                  }
+                                  const t = typeMap[v] || { color: 'default', label: v }
+                                  return <Tag color={t.color}>{t.label}</Tag>
+                                }
                               },
                               {
                                 title: '数量',
                                 dataIndex: 'quantity',
                                 key: 'quantity',
                                 width: 80,
-                                render: (v: number) => v.toLocaleString()
+                                render: (v: number | null) => v ? v.toLocaleString() : '-'
                               },
                               {
-                                title: '价格',
+                                title: '价格/金额',
                                 dataIndex: 'price',
                                 key: 'price',
-                                width: 80,
-                                render: (v: number) => v.toFixed(2)
+                                width: 100,
+                                render: (v: number, record: Transaction) => {
+                                  if (['DIVIDEND', 'TAX'].includes(record.trade_type)) {
+                                    return `¥${v.toLocaleString()}`
+                                  }
+                                  return v.toFixed(2)
+                                }
                               },
                               {
-                                title: '金额',
+                                title: '总金额',
                                 key: 'amount',
                                 width: 100,
-                                render: (_: any, record: Transaction) =>
-                                  `¥${(record.quantity * record.price).toLocaleString()}`
+                                render: (_: any, record: Transaction) => {
+                                  if (['DIVIDEND', 'TAX'].includes(record.trade_type)) {
+                                    return '-'
+                                  }
+                                  return `¥${((record.quantity || 0) * record.price).toLocaleString()}`
+                                }
                               },
                               {
                                 title: '佣金',
@@ -642,6 +732,10 @@ export default function PortfolioPage() {
                             loading={transactionsLoading}
                             pagination={{ pageSize: 20 }}
                             size="small"
+                            rowSelection={{
+                              selectedRowKeys: selectedTransactionIds,
+                              onChange: (keys) => setSelectedTransactionIds(keys as number[])
+                            }}
                           />
                         </>
                       )
@@ -734,6 +828,53 @@ export default function PortfolioPage() {
         </Form>
       </Modal>
 
+      {/* Edit Position Modal */}
+      <Modal
+        title={`编辑持仓 - ${editingPosition?.name || ''}`}
+        open={editPositionModalOpen}
+        onCancel={() => {
+          setEditPositionModalOpen(false)
+          setEditingPosition(null)
+          editPositionForm.resetFields()
+        }}
+        onOk={() => editPositionForm.submit()}
+      >
+        <Form form={editPositionForm} layout="vertical" onFinish={handleUpdatePosition}>
+          <Form.Item
+            name="quantity"
+            label="持仓数量"
+            rules={[{ required: true, message: '请输入数量' }]}
+          >
+            <InputNumber style={{ width: '100%' }} min={1} step={100} />
+          </Form.Item>
+          <Form.Item
+            name="avg_cost"
+            label="成本价"
+            rules={[{ required: true, message: '请输入成本价' }]}
+          >
+            <InputNumber style={{ width: '100%' }} min={0} step={0.01} precision={2} />
+          </Form.Item>
+          {editingPosition && (
+            <div style={{ marginBottom: 16, padding: 12, background: '#303030', borderRadius: 8 }}>
+              <Text type="secondary">当前市价: ¥{editingPosition.current_price.toFixed(2)}</Text>
+              <br />
+              <Text type="secondary">
+                预计盈亏: {(() => {
+                  const qty = editPositionForm.getFieldValue('quantity') || editingPosition.quantity
+                  const cost = editPositionForm.getFieldValue('avg_cost') || editingPosition.avg_cost
+                  const pnl = qty * editingPosition.current_price - qty * cost
+                  return (
+                    <span style={{ color: pnl >= 0 ? '#ef4444' : '#10b981' }}>
+                      {pnl >= 0 ? '+' : ''}¥{pnl.toFixed(2)}
+                    </span>
+                  )
+                })()}
+              </Text>
+            </div>
+          )}
+        </Form>
+      </Modal>
+
       {/* Edit Portfolio Modal */}
       <Modal
         title="编辑投资组合"
@@ -776,6 +917,7 @@ export default function PortfolioPage() {
         onCancel={() => {
           setAddTransactionModalOpen(false)
           transactionForm.resetFields()
+          setSelectedTradeType('BUY')
         }}
         onOk={() => transactionForm.submit()}
       >
@@ -797,32 +939,49 @@ export default function PortfolioPage() {
             name="trade_type"
             label="交易类型"
             rules={[{ required: true, message: '请选择交易类型' }]}
+            initialValue="BUY"
           >
             <Select
+              onChange={(v: TradeType) => setSelectedTradeType(v)}
               options={[
                 { value: 'BUY', label: '买入' },
-                { value: 'SELL', label: '卖出' }
+                { value: 'SELL', label: '卖出' },
+                { value: 'DIVIDEND', label: '分红' },
+                { value: 'TAX', label: '股息红利税补缴' }
               ]}
             />
           </Form.Item>
-          <Form.Item
-            name="quantity"
-            label="数量"
-            rules={[{ required: true, message: '请输入数量' }]}
-          >
-            <InputNumber style={{ width: '100%' }} min={100} step={100} />
-          </Form.Item>
-          <Form.Item
-            name="price"
-            label="价格"
-            rules={[{ required: true, message: '请输入价格' }]}
-          >
-            <InputNumber style={{ width: '100%' }} min={0} step={0.01} precision={2} />
-          </Form.Item>
-          <Form.Item name="commission" label="佣金">
-            <InputNumber style={{ width: '100%' }} min={0} step={0.01} precision={2} />
-          </Form.Item>
-          <Form.Item name="trade_date" label="交易日期">
+          {['BUY', 'SELL'].includes(selectedTradeType) && (
+            <>
+              <Form.Item
+                name="quantity"
+                label="数量"
+                rules={[{ required: true, message: '请输入数量' }]}
+              >
+                <InputNumber style={{ width: '100%' }} min={100} step={100} />
+              </Form.Item>
+              <Form.Item
+                name="price"
+                label="价格"
+                rules={[{ required: true, message: '请输入价格' }]}
+              >
+                <InputNumber style={{ width: '100%' }} min={0} step={0.01} precision={2} />
+              </Form.Item>
+              <Form.Item name="commission" label="佣金">
+                <InputNumber style={{ width: '100%' }} min={0} step={0.01} precision={2} />
+              </Form.Item>
+            </>
+          )}
+          {['DIVIDEND', 'TAX'].includes(selectedTradeType) && (
+            <Form.Item
+              name="amount"
+              label={selectedTradeType === 'DIVIDEND' ? '分红金额' : '税补缴金额'}
+              rules={[{ required: true, message: '请输入金额' }]}
+            >
+              <InputNumber style={{ width: '100%' }} min={0} step={0.01} precision={2} prefix="¥" />
+            </Form.Item>
+          )}
+          <Form.Item name="trade_date" label="日期">
             <DatePicker style={{ width: '100%' }} />
           </Form.Item>
         </Form>

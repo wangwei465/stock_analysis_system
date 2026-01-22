@@ -2,8 +2,18 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { ConfigProvider, theme } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
+import dayjs from 'dayjs'
+import 'dayjs/locale/zh-cn'
+import updateLocale from 'dayjs/plugin/updateLocale'
 import App from './App'
 import './styles/globals.css'
+
+// 配置 dayjs 中文 locale，星期从周一开始
+dayjs.extend(updateLocale)
+dayjs.locale('zh-cn')
+dayjs.updateLocale('zh-cn', {
+  weekStart: 1, // 周一为一周的第一天
+})
 
 // 现代深色主题配置
 const darkTheme = {

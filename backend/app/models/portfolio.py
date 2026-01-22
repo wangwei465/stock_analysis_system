@@ -28,6 +28,8 @@ class Position(SQLModel, table=True):
     avg_cost: float = Field(description="Average cost per share")
     buy_date: Optional[date] = Field(default=None, description="Buy date")
     notes: Optional[str] = Field(default=None, description="Notes")
+    total_dividend: float = Field(default=0, description="Total dividend received")
+    total_tax: float = Field(default=0, description="Total tax paid")
     created_at: datetime = Field(default_factory=datetime.now)
 
 
@@ -38,9 +40,9 @@ class Transaction(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     portfolio_id: int = Field(foreign_key="portfolios.id", index=True)
     code: str = Field(max_length=10, description="Stock code")
-    trade_type: str = Field(max_length=10, description="BUY or SELL")
-    quantity: int = Field(description="Number of shares")
-    price: float = Field(description="Trade price")
+    trade_type: str = Field(max_length=10, description="BUY/SELL/DIVIDEND/TAX")
+    quantity: Optional[int] = Field(default=None, description="Number of shares (for BUY/SELL)")
+    price: float = Field(description="Trade price or amount")
     commission: float = Field(default=0, description="Commission")
     trade_date: date = Field(description="Trade date")
     created_at: datetime = Field(default_factory=datetime.now)

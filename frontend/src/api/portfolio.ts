@@ -30,6 +30,8 @@ export interface PositionDetail extends Position {
   pnl_pct: number
   daily_pnl: number
   daily_pnl_pct: number
+  total_dividend: number
+  total_tax: number
   weight: number
 }
 
@@ -41,6 +43,8 @@ export interface PortfolioPerformance {
   total_value: number
   total_pnl: number
   total_pnl_pct: number
+  total_dividend: number
+  total_tax: number
   cash: number
   positions: PositionDetail[]
 }
@@ -132,12 +136,14 @@ export async function getPortfoliosSummary(): Promise<PortfolioSummary> {
 }
 
 // Transaction types
+export type TradeType = 'BUY' | 'SELL' | 'DIVIDEND' | 'TAX'
+
 export interface Transaction {
   id: number
   portfolio_id: number
   code: string
-  trade_type: 'BUY' | 'SELL'
-  quantity: number
+  trade_type: TradeType
+  quantity: number | null
   price: number
   commission: number
   trade_date: string
@@ -147,9 +153,9 @@ export interface Transaction {
 export interface CreateTransactionRequest {
   code: string
   name?: string
-  trade_type: 'BUY' | 'SELL'
-  quantity: number
-  price: number
+  trade_type: TradeType
+  quantity?: number  // Required for BUY/SELL, not for DIVIDEND/TAX
+  price: number      // Trade price for BUY/SELL, amount for DIVIDEND/TAX
   commission?: number
   trade_date?: string
 }
@@ -176,6 +182,13 @@ export async function deleteTransaction(portfolioId: number, transactionId: numb
   await client.delete(`/portfolios/${portfolioId}/transactions/${transactionId}`)
 }
 
+export async function batchDeleteTransactions(portfolioId: number, transactionIds: number[]): Promise<{ deleted: number }> {
+  const response = await client.post<{ deleted: number }>(`/portfolios/${portfolioId}/transactions/batch-delete`, {
+    transaction_ids: transactionIds
+  })
+  return response.data
+}
+
 export async function importTransactions(portfolioId: number, file: File): Promise<ImportResult> {
   const formData = new FormData()
   formData.append('file', file)
@@ -183,4 +196,8 @@ export async function importTransactions(portfolioId: number, file: File): Promi
     headers: { 'Content-Type': 'multipart/form-data' }
   })
   return response.data
+}
+
+export function getExportTransactionsUrl(portfolioId: number): string {
+  return `${client.defaults.baseURL}/portfolios/${portfolioId}/transactions/export`
 }

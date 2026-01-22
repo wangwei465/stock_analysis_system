@@ -156,9 +156,9 @@ class PortfolioUpdate(BaseModel):
 class TransactionCreate(BaseModel):
     code: str
     name: Optional[str] = None
-    trade_type: str  # BUY or SELL
-    quantity: int
-    price: float
+    trade_type: str  # BUY, SELL, DIVIDEND, TAX
+    quantity: Optional[int] = None  # Required for BUY/SELL, not for DIVIDEND/TAX
+    price: float  # Trade price for BUY/SELL, amount for DIVIDEND/TAX
     commission: Optional[float] = 0
     trade_date: Optional[date] = None
 
@@ -374,11 +374,15 @@ async def get_portfolio_performance(
     # Calculate performance
     total_cost = 0
     total_value = 0
+    total_dividend = 0
+    total_tax = 0
     position_details = []
 
     for pos in positions:
         cost = pos.quantity * pos.avg_cost
         total_cost += cost
+        total_dividend += pos.total_dividend
+        total_tax += pos.total_tax
 
         # Get current price and pre_close from pre-fetched quotes
         quote = quote_map.get(pos.code)
@@ -387,6 +391,7 @@ async def get_portfolio_performance(
         value = pos.quantity * current_price
         total_value += value
 
+        # PnL = market value - cost (NOT including dividend/tax)
         pnl = value - cost
         pnl_pct = (pnl / cost * 100) if cost > 0 else 0
 
@@ -409,6 +414,8 @@ async def get_portfolio_performance(
             "pnl_pct": round(pnl_pct, 2),
             "daily_pnl": round(daily_pnl, 2),
             "daily_pnl_pct": round(daily_pnl_pct, 2),
+            "total_dividend": round(pos.total_dividend, 2),
+            "total_tax": round(pos.total_tax, 2),
             "weight": 0  # Will calculate below
         })
 
@@ -416,7 +423,7 @@ async def get_portfolio_performance(
     for detail in position_details:
         detail["weight"] = round(detail["value"] / total_value * 100, 2) if total_value > 0 else 0
 
-    # Overall performance
+    # Overall performance (pnl NOT including dividend/tax, shown separately)
     total_pnl = total_value - total_cost
     total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
 
@@ -428,6 +435,8 @@ async def get_portfolio_performance(
         "total_value": round(total_value, 2),
         "total_pnl": round(total_pnl, 2),
         "total_pnl_pct": round(total_pnl_pct, 2),
+        "total_dividend": round(total_dividend, 2),
+        "total_tax": round(total_tax, 2),
         "cash": round(portfolio.initial_capital - total_cost, 2),
         "positions": position_details
     }
@@ -564,24 +573,40 @@ async def create_transaction(
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfolio not found")
 
-    if transaction.trade_type not in ["BUY", "SELL"]:
-        raise HTTPException(status_code=400, detail="trade_type must be BUY or SELL")
+    valid_types = ["BUY", "SELL", "DIVIDEND", "TAX"]
+    if transaction.trade_type not in valid_types:
+        raise HTTPException(status_code=400, detail=f"trade_type must be one of {valid_types}")
 
     trade_date_val = transaction.trade_date or date.today()
     commission_val = transaction.commission or 0
 
-    # Keep positions in sync
-    await _apply_trade_to_position(
-        session=session,
-        portfolio_id=portfolio_id,
-        code=transaction.code,
-        trade_type=transaction.trade_type,
-        quantity=transaction.quantity,
-        price=transaction.price,
-        commission=commission_val,
-        trade_date=trade_date_val,
-        name=transaction.name,
-    )
+    # Handle BUY/SELL - update position quantity and cost
+    if transaction.trade_type in ["BUY", "SELL"]:
+        if not transaction.quantity or transaction.quantity <= 0:
+            raise HTTPException(status_code=400, detail="quantity is required for BUY/SELL")
+        await _apply_trade_to_position(
+            session=session,
+            portfolio_id=portfolio_id,
+            code=transaction.code,
+            trade_type=transaction.trade_type,
+            quantity=transaction.quantity,
+            price=transaction.price,
+            commission=commission_val,
+            trade_date=trade_date_val,
+            name=transaction.name,
+        )
+
+    # Handle DIVIDEND/TAX - update position dividend/tax totals
+    elif transaction.trade_type in ["DIVIDEND", "TAX"]:
+        if transaction.price <= 0:
+            raise HTTPException(status_code=400, detail="amount must be > 0")
+        position = await _consolidate_positions_by_code(session, portfolio_id, transaction.code)
+        if not position:
+            raise HTTPException(status_code=400, detail="Position not found for DIVIDEND/TAX")
+        if transaction.trade_type == "DIVIDEND":
+            position.total_dividend += transaction.price
+        else:  # TAX
+            position.total_tax += transaction.price
 
     db_transaction = Transaction(
         portfolio_id=portfolio_id,
@@ -598,57 +623,85 @@ async def create_transaction(
     return db_transaction
 
 
+@router.get("/{portfolio_id}/transactions/export")
+async def export_transactions(
+    portfolio_id: int,
+    session: AsyncSession = Depends(get_session)
+):
+    """Export transactions to CSV file"""
+    from fastapi.responses import StreamingResponse
+
+    portfolio = await session.get(Portfolio, portfolio_id)
+    if not portfolio:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    result = await session.execute(
+        select(Transaction)
+        .where(Transaction.portfolio_id == portfolio_id)
+        .order_by(Transaction.trade_date.desc())
+    )
+    transactions = result.scalars().all()
+
+    # Build CSV content
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['code', 'trade_type', 'quantity', 'price', 'commission', 'trade_date'])
+    for t in transactions:
+        writer.writerow([t.code, t.trade_type, t.quantity or '', t.price, t.commission, t.trade_date])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=transactions_{portfolio_id}.csv"}
+    )
+
+
 @router.delete("/{portfolio_id}/transactions/{transaction_id}")
 async def delete_transaction(
     portfolio_id: int,
     transaction_id: int,
     session: AsyncSession = Depends(get_session)
 ):
-    """Delete a transaction record"""
+    """Delete a transaction record (does not affect positions)"""
     transaction = await session.get(Transaction, transaction_id)
     if not transaction or transaction.portfolio_id != portfolio_id:
         raise HTTPException(status_code=404, detail="Transaction not found")
 
-    # Reverse the impact on positions (best-effort; assumes user is deleting a recent mistaken record)
-    trade_date_val = transaction.trade_date
-    commission_val = transaction.commission or 0
-
-    if transaction.trade_type == "BUY":
-        # Reverse BUY: reduce position qty and re-calc avg_cost by removing this BUY cost basis
-        position = await _consolidate_positions_by_code(session, portfolio_id, transaction.code)
-        if position:
-            new_qty = position.quantity - transaction.quantity
-            if new_qty < 0:
-                raise HTTPException(status_code=400, detail="Cannot delete transaction: position quantity mismatch")
-            if new_qty == 0:
-                await session.delete(position)
-            else:
-                current_cost = position.quantity * position.avg_cost
-                new_cost = current_cost - (transaction.quantity * transaction.price + commission_val)
-                position.quantity = new_qty
-                position.avg_cost = new_cost / new_qty
-
-    elif transaction.trade_type == "SELL":
-        # Reverse SELL: increase position qty; avg_cost unchanged
-        position = await _consolidate_positions_by_code(session, portfolio_id, transaction.code)
-        if position:
-            position.quantity += transaction.quantity
-        else:
-            # No existing position: re-create with unknown avg_cost; use trade price as fallback
-            session.add(
-                Position(
-                    portfolio_id=portfolio_id,
-                    code=transaction.code,
-                    name=transaction.code,
-                    quantity=transaction.quantity,
-                    avg_cost=transaction.price,
-                    buy_date=trade_date_val,
-                )
-            )
-
+    # Only delete the transaction record, do not update positions
+    # Position updates only happen on BUY/SELL via create_transaction
     await session.delete(transaction)
     await session.commit()
     return {"message": "Transaction deleted"}
+
+
+class BatchDeleteRequest(BaseModel):
+    transaction_ids: List[int]
+
+
+@router.post("/{portfolio_id}/transactions/batch-delete")
+async def batch_delete_transactions(
+    portfolio_id: int,
+    request: BatchDeleteRequest,
+    session: AsyncSession = Depends(get_session)
+):
+    """Batch delete transaction records (does not affect positions)"""
+    if not request.transaction_ids:
+        return {"deleted": 0}
+
+    result = await session.execute(
+        select(Transaction).where(
+            Transaction.portfolio_id == portfolio_id,
+            Transaction.id.in_(request.transaction_ids)
+        )
+    )
+    transactions = result.scalars().all()
+
+    for t in transactions:
+        await session.delete(t)
+
+    await session.commit()
+    return {"deleted": len(transactions)}
 
 
 @router.post("/{portfolio_id}/transactions/import")
@@ -660,7 +713,10 @@ async def import_transactions(
     """
     Import transactions from CSV file.
     CSV format: code,trade_type,quantity,price,commission,trade_date
+    trade_type: BUY, SELL, DIVIDEND, TAX
+    For DIVIDEND/TAX: quantity can be empty, price is the amount
     Example: 000001,BUY,1000,10.50,5.25,2024-01-15
+    Example: 000001,DIVIDEND,,100.50,0,2024-06-15
     """
     portfolio = await session.get(Portfolio, portfolio_id)
     if not portfolio:
@@ -679,77 +735,89 @@ async def import_transactions(
     imported = 0
     errors = []
 
-    # Load existing positions once and consolidate duplicates per code
-    pos_result = await session.execute(select(Position).where(Position.portfolio_id == portfolio_id).order_by(Position.id))
-    existing_positions = pos_result.scalars().all()
-    positions_map: Dict[str, Position] = {}
-    duplicate_positions: List[Position] = []
-    for p in existing_positions:
-        if p.code in positions_map:
-            duplicate_positions.append(p)
-        else:
-            positions_map[p.code] = p
+    valid_types = ['BUY', 'SELL', 'DIVIDEND', 'TAX']
 
-    # Merge duplicates into primary rows
-    if duplicate_positions:
-        grouped: Dict[str, List[Position]] = {}
-        for p in existing_positions:
-            grouped.setdefault(p.code, []).append(p)
-        for code, plist in grouped.items():
-            if len(plist) <= 1:
-                continue
-            primary = plist[0]
-            total_qty = sum(x.quantity for x in plist)
-            total_cost = sum(x.quantity * x.avg_cost for x in plist)
-            primary.quantity = total_qty
-            primary.avg_cost = (total_cost / total_qty) if total_qty > 0 else primary.avg_cost
-            for extra in plist[1:]:
-                await session.delete(extra)
-        # refresh map after consolidation
-        positions_map = {p.code: p for p in existing_positions if p not in duplicate_positions}
+    # Collect all rows and sort by trade_date ascending, then BUY before SELL
+    # This ensures cost accumulation is correct when same-day trades exist
+    def sort_key(r):
+        trade_date = r.get('trade_date', '')
+        trade_type = r.get('trade_type', '').strip().upper()
+        # BUY=0, DIVIDEND=1, TAX=2, SELL=3 (BUY first, SELL last)
+        type_order = {'BUY': 0, 'DIVIDEND': 1, 'TAX': 2, 'SELL': 3}.get(trade_type, 9)
+        return (trade_date, type_order)
 
-    for row_num, row in enumerate(reader, start=2):
+    rows = list(reader)
+    rows.sort(key=sort_key)
+
+    for row_num, row in enumerate(rows, start=2):
         try:
             code = row.get('code', '').strip()
             name = row.get('name', '').strip() if row.get('name') is not None else ''
             trade_type = row.get('trade_type', '').strip().upper()
-            quantity = int(row.get('quantity', 0))
+            quantity_str = row.get('quantity', '').strip()
             price = float(row.get('price', 0))
             commission = float(row.get('commission', 0) or 0)
             trade_date_str = row.get('trade_date', '').strip()
 
-            if not code or trade_type not in ['BUY', 'SELL'] or quantity <= 0 or price <= 0:
+            if not code or trade_type not in valid_types or price <= 0:
                 errors.append(f"Row {row_num}: Invalid data")
                 continue
 
             trade_date_val = date.fromisoformat(trade_date_str) if trade_date_str else date.today()
 
-            # Apply to positions incrementally (in CSV order)
-            try:
-                await _apply_trade_to_position(
-                    session=session,
+            # Handle BUY/SELL
+            if trade_type in ['BUY', 'SELL']:
+                quantity = int(quantity_str) if quantity_str else 0
+                if quantity <= 0:
+                    errors.append(f"Row {row_num}: quantity required for BUY/SELL")
+                    continue
+                try:
+                    await _apply_trade_to_position(
+                        session=session,
+                        portfolio_id=portfolio_id,
+                        code=code,
+                        trade_type=trade_type,
+                        quantity=quantity,
+                        price=price,
+                        commission=commission,
+                        trade_date=trade_date_val,
+                        name=name or None,
+                    )
+                except HTTPException as e:
+                    errors.append(f"Row {row_num}: {e.detail}")
+                    continue
+
+                db_transaction = Transaction(
                     portfolio_id=portfolio_id,
                     code=code,
                     trade_type=trade_type,
                     quantity=quantity,
                     price=price,
                     commission=commission,
-                    trade_date=trade_date_val,
-                    name=name or None,
+                    trade_date=trade_date_val
                 )
-            except HTTPException as e:
-                errors.append(f"Row {row_num}: {e.detail}")
-                continue
 
-            db_transaction = Transaction(
-                portfolio_id=portfolio_id,
-                code=code,
-                trade_type=trade_type,
-                quantity=quantity,
-                price=price,
-                commission=commission,
-                trade_date=trade_date_val
-            )
+            # Handle DIVIDEND/TAX
+            else:
+                position = await _consolidate_positions_by_code(session, portfolio_id, code)
+                if not position:
+                    errors.append(f"Row {row_num}: Position not found for {trade_type}")
+                    continue
+                if trade_type == 'DIVIDEND':
+                    position.total_dividend += price
+                else:  # TAX
+                    position.total_tax += price
+
+                db_transaction = Transaction(
+                    portfolio_id=portfolio_id,
+                    code=code,
+                    trade_type=trade_type,
+                    quantity=None,
+                    price=price,
+                    commission=commission,
+                    trade_date=trade_date_val
+                )
+
             session.add(db_transaction)
             imported += 1
         except Exception as e:
