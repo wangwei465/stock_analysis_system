@@ -1,6 +1,20 @@
 """
 买卖信号生成器
-综合多种预测模型生成交易信号
+====================================
+综合多种预测模型和分析维度生成交易信号。
+
+本模块包含：
+- SignalGenerator: 核心信号生成器，整合7大分析维度
+- ComprehensivePredictor: 综合预测器，整合所有预测模型
+
+分析维度及权重配置（可在 config.py 中调整）：
+1. 技术指标分析: 25%
+2. 趋势分析: 20%
+3. 动量分析: 15%
+4. 波动率分析: 10%
+5. 成交量分析: 5%
+6. 资金流向: 15% (新增)
+7. 市场情绪: 10% (新增)
 """
 import pandas as pd
 import numpy as np
@@ -12,6 +26,33 @@ from app.ml.features import FeatureEngineer
 from app.ml.models.price_direction import QuickPredictionModel
 from app.ml.models.price_range import QuickPriceRangePredictor
 from app.core.indicator_calculator import IndicatorCalculator
+
+# 导入增强特征模块
+try:
+    from app.ml.enhanced_features import EnhancedFeatureGenerator
+    HAS_ENHANCED_FEATURES = True
+except ImportError:
+    HAS_ENHANCED_FEATURES = False
+
+# 导入配置
+try:
+    from app.ml.config import SIGNAL_WEIGHTS, RISK_PARAMS
+except ImportError:
+    # 默认配置
+    SIGNAL_WEIGHTS = {
+        'technical': 0.25,
+        'trend': 0.20,
+        'momentum': 0.15,
+        'volatility': 0.10,
+        'volume': 0.05,
+        'capital_flow': 0.15,
+        'market_sentiment': 0.10
+    }
+    RISK_PARAMS = {
+        'conservative': {'signal_threshold': 0.6, 'stop_loss_atr_mult': 1.5, 'take_profit_atr_mult': 2.0, 'min_confidence': 0.6},
+        'moderate': {'signal_threshold': 0.4, 'stop_loss_atr_mult': 2.0, 'take_profit_atr_mult': 3.0, 'min_confidence': 0.4},
+        'aggressive': {'signal_threshold': 0.2, 'stop_loss_atr_mult': 2.5, 'take_profit_atr_mult': 4.0, 'min_confidence': 0.2}
+    }
 
 
 class SignalType(Enum):
@@ -39,7 +80,21 @@ class TradingSignal:
 class SignalGenerator:
     """
     综合信号生成器
-    结合技术指标、价格预测、波动率分析生成交易信号
+    ====================================
+    结合技术指标、价格预测、波动率分析、资金流向、市场情绪生成交易信号。
+
+    分析维度（7个）：
+    1. 技术指标分析 - RSI、MACD、KDJ、布林带等
+    2. 趋势分析 - 均线系统、线性回归趋势
+    3. 动量分析 - 价格动量、ROC
+    4. 波动率分析 - 历史波动率、波动率变化
+    5. 成交量分析 - 量价配合、OBV
+    6. 资金流向分析 - 主力资金、北向资金 (新增)
+    7. 市场情绪分析 - 涨跌停统计、市场强度 (新增)
+
+    使用示例：
+    >>> generator = SignalGenerator(risk_tolerance='moderate')
+    >>> signal = generator.generate_signal(df, stock_code='000001')
     """
 
     def __init__(
@@ -52,42 +107,46 @@ class SignalGenerator:
 
         Args:
             risk_tolerance: 风险偏好
+                - 'conservative': 保守型，需要更强信号才触发
+                - 'moderate': 稳健型，默认设置
+                - 'aggressive': 激进型，较弱信号也会触发
             holding_period: 预期持仓周期(天)
         """
         self.risk_tolerance = risk_tolerance
         self.holding_period = holding_period
 
-        # 风险偏好对应的参数
-        self.risk_params = {
-            'conservative': {
-                'signal_threshold': 0.6,
-                'stop_loss_atr_mult': 1.5,
-                'take_profit_atr_mult': 2.0,
-                'min_confidence': 0.6
-            },
-            'moderate': {
-                'signal_threshold': 0.4,
-                'stop_loss_atr_mult': 2.0,
-                'take_profit_atr_mult': 3.0,
-                'min_confidence': 0.4
-            },
-            'aggressive': {
-                'signal_threshold': 0.2,
-                'stop_loss_atr_mult': 2.5,
-                'take_profit_atr_mult': 4.0,
-                'min_confidence': 0.2
-            }
-        }
+        # 使用配置文件中的风险参数
+        self.risk_params = RISK_PARAMS
 
-    def generate_signal(self, df: pd.DataFrame) -> Dict:
+        # 初始化增强特征生成器（资金流向和市场情绪）
+        self.enhanced_feature_generator = None
+        if HAS_ENHANCED_FEATURES:
+            try:
+                self.enhanced_feature_generator = EnhancedFeatureGenerator()
+            except Exception as e:
+                print(f"初始化增强特征生成器失败: {e}")
+
+    def generate_signal(self, df: pd.DataFrame, stock_code: str = None) -> Dict:
         """
         生成综合交易信号
 
+        整合7大分析维度，加权计算综合得分，生成最终交易信号。
+
         Args:
-            df: OHLCV数据
+            df: OHLCV 历史行情数据
+            stock_code: 股票代码（用于获取资金流向等实时数据）
 
         Returns:
-            交易信号详情
+            Dict: 交易信号详情，包含：
+                - signal: 信号类型 (-2 到 2)
+                - signal_label: 信号标签
+                - confidence: 置信度
+                - score: 综合得分
+                - reasons: 主要原因列表
+                - components: 各维度详细分析
+                - entry_price: 建议入场价
+                - stop_loss: 止损位
+                - take_profit: 止盈位
         """
         if len(df) < 60:
             return {
@@ -101,46 +160,74 @@ class SignalGenerator:
         current_price = df['close'].iloc[-1]
         params = self.risk_params[self.risk_tolerance]
 
+        # =====================================================================
         # 收集各维度的信号
+        # =====================================================================
         components = {}
         scores = []
         reasons = []
 
-        # 1. 技术指标信号
+        # ----- 1. 技术指标信号 (权重: 25%) -----
         tech_signal = self._analyze_technical_indicators(df)
         components['technical'] = tech_signal
-        scores.append(tech_signal['score'] * 0.3)  # 30%权重
+        scores.append(tech_signal['score'] * SIGNAL_WEIGHTS.get('technical', 0.25))
         reasons.extend(tech_signal['reasons'])
 
-        # 2. 趋势信号
+        # ----- 2. 趋势信号 (权重: 20%) -----
         trend_signal = self._analyze_trend(df)
         components['trend'] = trend_signal
-        scores.append(trend_signal['score'] * 0.25)  # 25%权重
+        scores.append(trend_signal['score'] * SIGNAL_WEIGHTS.get('trend', 0.20))
         reasons.extend(trend_signal['reasons'])
 
-        # 3. 动量信号
+        # ----- 3. 动量信号 (权重: 15%) -----
         momentum_signal = self._analyze_momentum(df)
         components['momentum'] = momentum_signal
-        scores.append(momentum_signal['score'] * 0.2)  # 20%权重
+        scores.append(momentum_signal['score'] * SIGNAL_WEIGHTS.get('momentum', 0.15))
         reasons.extend(momentum_signal['reasons'])
 
-        # 4. 波动率和风险信号
+        # ----- 4. 波动率和风险信号 (权重: 10%) -----
         volatility_signal = self._analyze_volatility(df)
         components['volatility'] = volatility_signal
-        scores.append(volatility_signal['score'] * 0.15)  # 15%权重
+        scores.append(volatility_signal['score'] * SIGNAL_WEIGHTS.get('volatility', 0.10))
         reasons.extend(volatility_signal['reasons'])
 
-        # 5. 成交量信号
+        # ----- 5. 成交量信号 (权重: 5%) -----
         volume_signal = self._analyze_volume(df)
         components['volume'] = volume_signal
-        scores.append(volume_signal['score'] * 0.1)  # 10%权重
+        scores.append(volume_signal['score'] * SIGNAL_WEIGHTS.get('volume', 0.05))
         reasons.extend(volume_signal['reasons'])
 
+        # ----- 6. 资金流向信号 (权重: 15%) [新增] -----
+        if self.enhanced_feature_generator and stock_code:
+            try:
+                capital_signal = self.enhanced_feature_generator.capital_flow_analyzer.generate_capital_flow_signal(stock_code)
+                components['capital_flow'] = capital_signal
+                scores.append(capital_signal['score'] * SIGNAL_WEIGHTS.get('capital_flow', 0.15))
+                reasons.extend(capital_signal['reasons'])
+            except Exception as e:
+                print(f"资金流向分析失败: {e}")
+                components['capital_flow'] = {'score': 0, 'reasons': ['资金流向数据获取失败']}
+
+        # ----- 7. 市场情绪信号 (权重: 10%) [新增] -----
+        if self.enhanced_feature_generator:
+            try:
+                sentiment_signal = self.enhanced_feature_generator.sentiment_analyzer.generate_sentiment_signal()
+                components['market_sentiment'] = sentiment_signal
+                scores.append(sentiment_signal['score'] * SIGNAL_WEIGHTS.get('market_sentiment', 0.10))
+                reasons.extend(sentiment_signal['reasons'])
+            except Exception as e:
+                print(f"市场情绪分析失败: {e}")
+                components['market_sentiment'] = {'score': 0, 'reasons': ['市场情绪数据获取失败']}
+
+        # =====================================================================
         # 计算综合得分
+        # =====================================================================
         total_score = sum(scores)
         confidence = min(abs(total_score) / params['signal_threshold'], 1)
 
+        # =====================================================================
         # 确定信号类型
+        # =====================================================================
         if total_score >= params['signal_threshold'] * 2:
             signal = SignalType.STRONG_BUY
             signal_label = '强烈买入'
@@ -157,7 +244,9 @@ class SignalGenerator:
             signal = SignalType.HOLD
             signal_label = '持有/观望'
 
+        # =====================================================================
         # 计算止损止盈位
+        # =====================================================================
         atr = self._calculate_atr(df)
         stop_loss = None
         take_profit = None
@@ -172,7 +261,7 @@ class SignalGenerator:
             take_profit = current_price - atr * params['take_profit_atr_mult']
             risk_reward = params['take_profit_atr_mult'] / params['stop_loss_atr_mult']
 
-        # 过滤原因,只保留主要的
+        # 过滤原因，只保留主要的
         main_reasons = [r for r in reasons if r][:5]
 
         return {
@@ -483,20 +572,31 @@ class SignalGenerator:
 class ComprehensivePredictor:
     """
     综合预测器
-    整合所有预测模型
+    ====================================
+    整合所有预测模型，生成完整的预测报告。
+
+    使用示例：
+    >>> result = ComprehensivePredictor.predict(df, forward_days=5, stock_code='000001')
     """
 
     @staticmethod
-    def predict(df: pd.DataFrame, forward_days: int = 5) -> Dict:
+    def predict(df: pd.DataFrame, forward_days: int = 5, stock_code: str = None) -> Dict:
         """
         生成综合预测报告
 
         Args:
-            df: OHLCV数据
+            df: OHLCV 历史行情数据
             forward_days: 预测天数
+            stock_code: 股票代码（用于获取资金流向等实时数据）
 
         Returns:
-            综合预测结果
+            Dict: 综合预测结果，包含：
+                - stock_info: 股票基本信息
+                - direction: 方向预测
+                - price_range: 价格区间预测
+                - signal: 交易信号
+                - risk: 风险评估
+                - recommendation: 综合建议
         """
         result = {
             'stock_info': {
@@ -513,9 +613,9 @@ class ComprehensivePredictor:
         price_range = QuickPriceRangePredictor.predict(df, forward_days)
         result['price_range'] = price_range
 
-        # 3. 交易信号
+        # 3. 交易信号（传入 stock_code 以启用增强分析）
         signal_gen = SignalGenerator(risk_tolerance='moderate', holding_period=forward_days)
-        signal = signal_gen.generate_signal(df)
+        signal = signal_gen.generate_signal(df, stock_code=stock_code)
         result['signal'] = signal
 
         # 4. 风险评估
@@ -527,7 +627,7 @@ class ComprehensivePredictor:
                 (df['close'].tail(20) / df['close'].tail(20).cummax() - 1).min() * 100
             ),
             'var_95': float(returns.quantile(0.05) * 100),  # 95% VaR
-            'cvar_95': float(returns[returns <= returns.quantile(0.05)].mean() * 100)  # CVaR
+            'cvar_95': float(returns[returns <= returns.quantile(0.05)].mean() * 100) if len(returns[returns <= returns.quantile(0.05)]) > 0 else 0  # CVaR
         }
 
         # 5. 综合建议

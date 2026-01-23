@@ -49,12 +49,6 @@ const RECOMMENDATION_OPTIONS = [
   { label: '强烈卖出', value: '强烈卖出' },
 ]
 
-const ACCURACY_COLOR: Record<AccuracyStatus, string> = {
-  unknown: 'default',
-  accurate: 'green',
-  inaccurate: 'red',
-}
-
 const DIRECTION_COLOR: Record<string, string> = {
   '看涨': 'green',
   '看跌': 'red',

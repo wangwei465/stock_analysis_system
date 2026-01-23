@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import {
   Card,
   Row,
@@ -16,8 +16,11 @@ import {
   Divider,
   Spin,
   Alert,
-  Slider
+  Slider,
+  Tooltip,
+  Dropdown
 } from 'antd'
+import type { MenuProps } from 'antd'
 import {
   RobotOutlined,
   ThunderboltOutlined,
@@ -28,8 +31,12 @@ import {
   MinusOutlined,
   WarningOutlined,
   CheckCircleOutlined,
-  InfoCircleOutlined
+  InfoCircleOutlined,
+  QuestionCircleOutlined,
+  DownloadOutlined,
+  FileTextOutlined
 } from '@ant-design/icons'
+import debounce from 'lodash/debounce'
 import { searchStocks } from '../api/stocks'
 import {
   getComprehensivePrediction,
@@ -37,7 +44,7 @@ import {
   getSentimentAnalysis,
   SentimentSummary
 } from '../api/ml'
-import { createPredictionRecord } from '../api/predictionRecords'
+import { createPredictionRecord, AccuracyStatus } from '../api/predictionRecords'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -61,22 +68,39 @@ export default function Prediction() {
   const [loading, setLoading] = useState(false)
   const [prediction, setPrediction] = useState<ComprehensivePrediction | null>(null)
   const [sentiment, setSentiment] = useState<SentimentSummary | null>(null)
+  const [searchLoading, setSearchLoading] = useState(false)
 
-  const handleSearchStock = async (value: string) => {
-    if (!value || value.length < 1) {
-      setStockOptions([])
-      return
-    }
-    try {
-      const results = await searchStocks(value)
-      setStockOptions(results.map(s => ({
-        value: s.code,
-        label: `${s.code} - ${s.name}`
-      })))
-    } catch (error) {
-      console.error('Search error:', error)
-    }
-  }
+  // =========================================================================
+  // 防抖搜索：500ms延迟，避免频繁API调用
+  // =========================================================================
+  const debouncedSearch = useMemo(
+    () =>
+      debounce(async (value: string) => {
+        if (!value || value.length < 1) {
+          setStockOptions([])
+          setSearchLoading(false)
+          return
+        }
+        try {
+          const results = await searchStocks(value)
+          setStockOptions(results.map(s => ({
+            value: s.code,
+            label: `${s.code} - ${s.name}`
+          })))
+        } catch (error) {
+          console.error('搜索错误:', error)
+        } finally {
+          setSearchLoading(false)
+        }
+      }, 500),
+    []
+  )
+
+  // 搜索处理函数
+  const handleSearchStock = useCallback((value: string) => {
+    setSearchLoading(true)
+    debouncedSearch(value)
+  }, [debouncedSearch])
 
   const safeNumber = (value: number | null | undefined): number | null => {
     if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) {
@@ -99,7 +123,7 @@ export default function Prediction() {
       support: safeNumber(predResult.price_range?.support_resistance?.support),
       resistance: safeNumber(predResult.price_range?.support_resistance?.resistance),
       prediction_date: predResult.prediction_date || now.toISOString().slice(0, 10),
-      accuracy: 'unknown',
+      accuracy: 'unknown' as AccuracyStatus,
     }
   }
 
@@ -131,6 +155,104 @@ export default function Prediction() {
       setLoading(false)
     }
   }
+
+  // =========================================================================
+  // 导出功能：支持CSV和JSON格式导出预测结果
+  // =========================================================================
+  const exportToCSV = useCallback(() => {
+    if (!prediction) {
+      message.warning('暂无预测数据可导出')
+      return
+    }
+
+    // 构建CSV数据
+    const csvRows = [
+      ['字段', '值'],
+      ['股票代码', prediction.stock_code],
+      ['股票名称', prediction.stock_name],
+      ['当前价格', prediction.stock_info?.current_price?.toString() || ''],
+      ['预测周期', `${prediction.forward_days}天`],
+      ['方向预测', prediction.direction?.direction_label || ''],
+      ['方向置信度', `${((prediction.direction?.confidence || 0) * 100).toFixed(1)}%`],
+      ['交易信号', prediction.signal?.signal_label || ''],
+      ['信号置信度', `${((prediction.signal?.confidence || 0) * 100).toFixed(1)}%`],
+      ['综合建议', prediction.recommendation?.action || ''],
+      ['风险等级', prediction.recommendation?.risk_level || ''],
+      ['预期价格', prediction.price_range?.expected?.price?.toFixed(2) || ''],
+      ['支撑位', prediction.price_range?.support_resistance?.support?.toFixed(2) || ''],
+      ['阻力位', prediction.price_range?.support_resistance?.resistance?.toFixed(2) || ''],
+      ['日波动率', `${prediction.risk?.daily_volatility?.toFixed(2) || ''}%`],
+      ['年化波动率', `${prediction.risk?.annualized_volatility?.toFixed(2) || ''}%`],
+      ['20日最大回撤', `${prediction.risk?.max_drawdown_20d?.toFixed(2) || ''}%`],
+      ['VaR(95%)', `${prediction.risk?.var_95?.toFixed(2) || ''}%`],
+      ['预测日期', prediction.prediction_date || new Date().toISOString().slice(0, 10)]
+    ]
+
+    const csvContent = csvRows.map(row => row.join(',')).join('\n')
+    const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `预测报告_${prediction.stock_code}_${new Date().toISOString().slice(0, 10)}.csv`
+    link.click()
+    message.success('CSV导出成功')
+  }, [prediction])
+
+  const exportToJSON = useCallback(() => {
+    if (!prediction) {
+      message.warning('暂无预测数据可导出')
+      return
+    }
+
+    const exportData = {
+      stock_code: prediction.stock_code,
+      stock_name: prediction.stock_name,
+      prediction_date: prediction.prediction_date || new Date().toISOString().slice(0, 10),
+      forward_days: prediction.forward_days,
+      current_price: prediction.stock_info?.current_price,
+      direction: {
+        label: prediction.direction?.direction_label,
+        confidence: prediction.direction?.confidence
+      },
+      signal: {
+        label: prediction.signal?.signal_label,
+        confidence: prediction.signal?.confidence,
+        entry_price: prediction.signal?.entry_price,
+        stop_loss: prediction.signal?.stop_loss,
+        take_profit: prediction.signal?.take_profit
+      },
+      recommendation: prediction.recommendation,
+      price_range: {
+        expected: prediction.price_range?.expected,
+        support: prediction.price_range?.support_resistance?.support,
+        resistance: prediction.price_range?.support_resistance?.resistance
+      },
+      risk: prediction.risk,
+      sentiment: sentiment
+    }
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `预测报告_${prediction.stock_code}_${new Date().toISOString().slice(0, 10)}.json`
+    link.click()
+    message.success('JSON导出成功')
+  }, [prediction, sentiment])
+
+  // 导出菜单项
+  const exportMenuItems: MenuProps['items'] = [
+    {
+      key: 'csv',
+      icon: <FileTextOutlined />,
+      label: '导出为 CSV',
+      onClick: exportToCSV
+    },
+    {
+      key: 'json',
+      icon: <FileTextOutlined />,
+      label: '导出为 JSON',
+      onClick: exportToJSON
+    }
+  ]
 
   const getSignalColor = (signal: number) => {
     if (signal >= 2) return colors.success
@@ -183,6 +305,8 @@ export default function Prediction() {
               options={stockOptions}
               filterOption={false}
               size="large"
+              loading={searchLoading}
+              notFoundContent={searchLoading ? <Spin size="small" /> : '暂无数据'}
             />
           </Col>
           <Col xs={24} sm={24} md={10}>
@@ -198,17 +322,25 @@ export default function Prediction() {
             />
           </Col>
           <Col xs={24} sm={24} md={6}>
-            <Button
-              type="primary"
-              icon={<ThunderboltOutlined />}
-              onClick={handlePredict}
-              loading={loading}
-              size="large"
-              block
-              style={{ marginTop: 8 }}
-            >
-              开始预测
-            </Button>
+            <Space style={{ width: '100%', marginTop: 8 }} direction="vertical">
+              <Button
+                type="primary"
+                icon={<ThunderboltOutlined />}
+                onClick={handlePredict}
+                loading={loading}
+                size="large"
+                block
+              >
+                开始预测
+              </Button>
+              {prediction && (
+                <Dropdown menu={{ items: exportMenuItems }} placement="bottom">
+                  <Button icon={<DownloadOutlined />} block>
+                    导出报告
+                  </Button>
+                </Dropdown>
+              )}
+            </Space>
           </Col>
         </Row>
       </Card>
@@ -423,63 +555,90 @@ export default function Prediction() {
                     </Col>
                   </Row>
 
-                  {/* 风险指标 */}
+                  {/* 风险指标 - 带Tooltip说明 */}
                   <Card
                     title={
                       <Space>
                         <WarningOutlined style={{ color: colors.warning }} />
                         <span>风险评估</span>
+                        <Tooltip title="风险指标帮助您评估投资的潜在风险，数值越高表示风险越大">
+                          <QuestionCircleOutlined style={{ color: colors.textSecondary, cursor: 'help' }} />
+                        </Tooltip>
                       </Space>
                     }
                     style={{ marginTop: 16 }}
                   >
                     <Row gutter={[16, 16]}>
                       <Col xs={12} sm={8} lg={4}>
-                        <Statistic
-                          title="日波动率"
-                          value={prediction.risk.daily_volatility}
-                          precision={2}
-                          suffix="%"
-                        />
+                        <Tooltip title="日波动率：衡量股价单日波动幅度，反映短期风险水平">
+                          <div>
+                            <Statistic
+                              title={<span>日波动率 <QuestionCircleOutlined style={{ fontSize: 12, color: colors.textSecondary }} /></span>}
+                              value={prediction.risk.daily_volatility}
+                              precision={2}
+                              suffix="%"
+                            />
+                          </div>
+                        </Tooltip>
                       </Col>
                       <Col xs={12} sm={8} lg={4}>
-                        <Statistic
-                          title="年化波动率"
-                          value={prediction.risk.annualized_volatility}
-                          precision={2}
-                          suffix="%"
-                        />
+                        <Tooltip title="年化波动率：将日波动率换算为年度指标，便于与其他投资品种比较。通常>40%为高波动，<20%为低波动">
+                          <div>
+                            <Statistic
+                              title={<span>年化波动率 <QuestionCircleOutlined style={{ fontSize: 12, color: colors.textSecondary }} /></span>}
+                              value={prediction.risk.annualized_volatility}
+                              precision={2}
+                              suffix="%"
+                            />
+                          </div>
+                        </Tooltip>
                       </Col>
                       <Col xs={12} sm={8} lg={4}>
-                        <Statistic
-                          title="20日最大回撤"
-                          value={prediction.risk.max_drawdown_20d}
-                          precision={2}
-                          suffix="%"
-                          valueStyle={{ color: colors.error }}
-                        />
+                        <Tooltip title="最大回撤：近20个交易日内从最高点到最低点的最大跌幅，反映最坏情况下的损失程度">
+                          <div>
+                            <Statistic
+                              title={<span>20日最大回撤 <QuestionCircleOutlined style={{ fontSize: 12, color: colors.textSecondary }} /></span>}
+                              value={prediction.risk.max_drawdown_20d}
+                              precision={2}
+                              suffix="%"
+                              valueStyle={{ color: colors.error }}
+                            />
+                          </div>
+                        </Tooltip>
                       </Col>
                       <Col xs={12} sm={8} lg={4}>
-                        <Statistic
-                          title="VaR (95%)"
-                          value={prediction.risk.var_95}
-                          precision={2}
-                          suffix="%"
-                        />
+                        <Tooltip title="VaR (在险价值)：在95%置信度下，持有1天可能遭受的最大损失。例如VaR为-3%表示有5%概率损失超过3%">
+                          <div>
+                            <Statistic
+                              title={<span>VaR (95%) <QuestionCircleOutlined style={{ fontSize: 12, color: colors.textSecondary }} /></span>}
+                              value={prediction.risk.var_95}
+                              precision={2}
+                              suffix="%"
+                            />
+                          </div>
+                        </Tooltip>
                       </Col>
                       <Col xs={12} sm={8} lg={4}>
-                        <Statistic
-                          title="CVaR (95%)"
-                          value={prediction.risk.cvar_95}
-                          precision={2}
-                          suffix="%"
-                        />
+                        <Tooltip title="CVaR (条件在险价值)：当损失超过VaR时的平均损失，比VaR更能反映极端风险">
+                          <div>
+                            <Statistic
+                              title={<span>CVaR (95%) <QuestionCircleOutlined style={{ fontSize: 12, color: colors.textSecondary }} /></span>}
+                              value={prediction.risk.cvar_95}
+                              precision={2}
+                              suffix="%"
+                            />
+                          </div>
+                        </Tooltip>
                       </Col>
                       <Col xs={12} sm={8} lg={4}>
-                        <Statistic
-                          title="波动率水平"
-                          value={prediction.price_range.risk_assessment?.volatility_level || '-'}
-                        />
+                        <Tooltip title="波动率水平综合评估：高、中、低三档，帮助快速判断股票风险等级">
+                          <div>
+                            <Statistic
+                              title={<span>波动率水平 <QuestionCircleOutlined style={{ fontSize: 12, color: colors.textSecondary }} /></span>}
+                              value={prediction.price_range.risk_assessment?.volatility_level || '-'}
+                            />
+                          </div>
+                        </Tooltip>
                       </Col>
                     </Row>
                   </Card>

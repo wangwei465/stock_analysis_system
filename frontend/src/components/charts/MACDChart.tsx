@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react'
 import {
   createChart,
   IChartApi,
-  ISeriesApi,
   HistogramData,
   LineData,
   ColorType,

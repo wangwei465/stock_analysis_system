@@ -340,8 +340,15 @@ class FeatureEngineer:
                 cls.calculate_technical_features(df)
             ], axis=1)
 
-        # 移除无穷大和NaN
+        # =========================================================================
+        # 数据清洗：处理无穷大值和缺失值
+        # =========================================================================
+        # 步骤1：将正负无穷大替换为NaN
         all_features = all_features.replace([np.inf, -np.inf], np.nan)
+
+        # 步骤2：填充所有NaN值为0，避免后续模型预测时出错
+        # 注意：这是一种保守的填充策略，确保特征矩阵无缺失值
+        all_features = all_features.fillna(0)
 
         return all_features
 

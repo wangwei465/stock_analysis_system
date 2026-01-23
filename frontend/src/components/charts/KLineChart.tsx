@@ -340,7 +340,7 @@ export default function KLineChart({
 
     // Volume data with colors
     if (volumeSeriesRef.current) {
-      const volumeData = data.map((d, i) => ({
+      const volumeData = data.map((d) => ({
         time: d.time,
         value: d.volume,
         color: d.close >= d.open ? 'rgba(239, 68, 68, 0.5)' : 'rgba(16, 185, 129, 0.5)',

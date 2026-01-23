@@ -19,7 +19,6 @@ import {
   RiseOutlined,
   FallOutlined,
   ReloadOutlined,
-  FolderOutlined,
   WalletOutlined
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'

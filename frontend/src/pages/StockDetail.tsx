@@ -30,7 +30,7 @@ import { getKline, getStockInfo, getRealtimeQuote } from '../api/stocks'
 import { getAllIndicators } from '../api/indicators'
 import { useStockStore } from '../store/stockStore'
 import { useIntradayWebSocket } from '../hooks/useIntradayWebSocket'
-import type { StockQuote, AllIndicators } from '../types/stock'
+import type { StockQuote } from '../types/stock'
 
 const { Title, Text } = Typography
 
@@ -46,7 +46,8 @@ export default function StockDetail() {
     data: intradayData,
     preClose: intradayPreClose,
     isConnected: wsConnected,
-    error: wsError
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    error: _wsError
   } = useIntradayWebSocket(chartType === 'intraday' ? code : undefined)
 
   const {

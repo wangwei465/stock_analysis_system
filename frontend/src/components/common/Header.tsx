@@ -10,7 +10,9 @@ const { Text } = Typography
 
 export default function Header() {
   const [options, setOptions] = useState<{ value: string; label: React.ReactNode }[]>([])
-  const [loading, setLoading] = useState(false)
+  // loading 状态仅用于控制加载流程，UI 不显示
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [_loading, setLoading] = useState(false)
   const navigate = useNavigate()
 
   const handleSearch = async (value: string) => {
