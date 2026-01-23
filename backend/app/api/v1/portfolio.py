@@ -1,5 +1,5 @@
 """Portfolio management API endpoints"""
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import date
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,116 @@ from app.database import get_session
 from app.models.portfolio import Portfolio, Position, Transaction
 
 router = APIRouter()
+
+
+async def _get_today_trades(
+    session: AsyncSession,
+    portfolio_id: int,
+    code: str,
+) -> Tuple[int, float, int, float]:
+    """
+    获取今日该股票的交易汇总
+
+    Args:
+        session: 数据库会话
+        portfolio_id: 投资组合ID
+        code: 股票代码
+
+    Returns:
+        Tuple[今日买入数量, 今日买入均价, 今日卖出数量, 今日卖出均价]
+    """
+    today = date.today()
+    result = await session.execute(
+        select(Transaction)
+        .where(
+            Transaction.portfolio_id == portfolio_id,
+            Transaction.code == code,
+            Transaction.trade_date == today,
+            Transaction.trade_type.in_(["BUY", "SELL"])
+        )
+    )
+    transactions = result.scalars().all()
+
+    buy_qty = 0
+    buy_amount = 0.0
+    sell_qty = 0
+    sell_amount = 0.0
+
+    for txn in transactions:
+        if txn.trade_type == "BUY" and txn.quantity:
+            buy_qty += txn.quantity
+            buy_amount += txn.quantity * txn.price
+        elif txn.trade_type == "SELL" and txn.quantity:
+            sell_qty += txn.quantity
+            sell_amount += txn.quantity * txn.price
+
+    buy_avg_price = (buy_amount / buy_qty) if buy_qty > 0 else 0
+    sell_avg_price = (sell_amount / sell_qty) if sell_qty > 0 else 0
+
+    return buy_qty, buy_avg_price, sell_qty, sell_avg_price
+
+
+def calculate_daily_pnl(
+    current_price: float,
+    pre_close: float,
+    current_qty: int,
+    avg_cost: float,
+    today_buy_qty: int,
+    today_buy_price: float,
+    today_sell_qty: int,
+    today_sell_price: float,
+) -> Tuple[float, float]:
+    """
+    计算当日盈亏
+
+    算法说明：
+    1. 昨日持有数量 = 当前数量 - 今日买入 + 今日卖出
+    2. 昨日持有部分的当日盈亏 = (现价 - 昨收) × 昨日持有数量
+    3. 今日买入部分的当日盈亏 = (现价 - 买入价) × 今日买入数量
+    4. 今日卖出部分的当日实现盈亏 = (卖出价 - 成本价) × 今日卖出数量
+    5. 总当日盈亏 = 2 + 3 + 4
+
+    Args:
+        current_price: 当前价格
+        pre_close: 昨日收盘价
+        current_qty: 当前持仓数量
+        avg_cost: 平均成本价
+        today_buy_qty: 今日买入数量
+        today_buy_price: 今日买入均价
+        today_sell_qty: 今日卖出数量
+        today_sell_price: 今日卖出均价
+
+    Returns:
+        Tuple[当日盈亏金额, 当日盈亏百分比]
+    """
+    # 昨日持有数量
+    yesterday_qty = current_qty - today_buy_qty + today_sell_qty
+
+    # 1. 昨日持有部分的当日浮盈
+    yesterday_daily_pnl = 0.0
+    if yesterday_qty > 0 and pre_close > 0:
+        yesterday_daily_pnl = (current_price - pre_close) * yesterday_qty
+
+    # 2. 今日买入部分的当日浮盈
+    today_buy_pnl = 0.0
+    if today_buy_qty > 0 and today_buy_price > 0:
+        today_buy_pnl = (current_price - today_buy_price) * today_buy_qty
+
+    # 3. 今日卖出部分的实现盈亏
+    today_sell_pnl = 0.0
+    if today_sell_qty > 0 and today_sell_price > 0:
+        today_sell_pnl = (today_sell_price - avg_cost) * today_sell_qty
+
+    # 总当日盈亏
+    total_daily_pnl = yesterday_daily_pnl + today_buy_pnl + today_sell_pnl
+
+    # 计算当日盈亏百分比（基于昨日收盘市值 + 今日买入成本）
+    # 基准值 = 昨日市值 + 今日买入成本
+    base_value = (yesterday_qty * pre_close if pre_close > 0 else yesterday_qty * avg_cost) + (today_buy_qty * today_buy_price)
+    daily_pnl_pct = (total_daily_pnl / base_value * 100) if base_value > 0 else 0
+
+    return total_daily_pnl, daily_pnl_pct
+
 
 async def _get_positions_by_code(
     session: AsyncSession,
@@ -72,8 +182,20 @@ async def _apply_trade_to_position(
     name: Optional[str] = None,
 ) -> None:
     """
-    Apply a BUY/SELL transaction to positions table so that holdings and
-    transaction records stay in sync.
+    处理买入/卖出交易，同步更新持仓表
+
+    买入逻辑：
+    - 新建仓：平均成本 = (数量 × 价格 + 手续费) / 数量
+    - 加仓：新平均成本 = (原成本总额 + 新买入金额 + 手续费) / 新总数量
+
+    卖出逻辑：
+    - 减少持仓数量
+    - 如果全部卖出，删除该持仓记录
+    - 注意：卖出不影响平均成本（成本是买入时确定的）
+
+    盈亏计算说明（在 get_portfolio_performance 中实时计算）：
+    - 持仓盈亏 = 当前市值 - 成本 = 数量 × 现价 - 数量 × 平均成本
+    - 卖出后，数量减少，盈亏自动按比例减少
     """
     if quantity <= 0:
         raise HTTPException(status_code=400, detail="quantity must be > 0")
@@ -87,6 +209,7 @@ async def _apply_trade_to_position(
     if trade_type == "BUY":
         safe_name = (name or "").strip()
         if position:
+            # 加仓：更新数量和平均成本
             total_cost = position.quantity * position.avg_cost + quantity * price + commission
             total_qty = position.quantity + quantity
             position.quantity = total_qty
@@ -95,6 +218,9 @@ async def _apply_trade_to_position(
                 position.name = safe_name
             if position.buy_date is None or trade_date < position.buy_date:
                 position.buy_date = trade_date
+            # 显式添加并刷新到数据库
+            session.add(position)
+            await session.flush()
         else:
             if not safe_name:
                 safe_name = code
@@ -120,6 +246,11 @@ async def _apply_trade_to_position(
         position.quantity -= quantity
         if position.quantity == 0:
             await session.delete(position)
+        else:
+            # 显式添加并刷新到数据库，确保更改被正确保存
+            session.add(position)
+        # 强制刷新到数据库
+        await session.flush()
         return
 
     raise HTTPException(status_code=400, detail="trade_type must be BUY or SELL")
@@ -395,10 +526,22 @@ async def get_portfolio_performance(
         pnl = value - cost
         pnl_pct = (pnl / cost * 100) if cost > 0 else 0
 
-        # Daily profit/loss
-        daily_change = current_price - pre_close
-        daily_pnl = daily_change * pos.quantity
-        daily_pnl_pct = (daily_change / pre_close * 100) if pre_close > 0 else 0
+        # 获取今日交易记录，用于精确计算当日盈亏
+        today_buy_qty, today_buy_price, today_sell_qty, today_sell_price = await _get_today_trades(
+            session, portfolio_id, pos.code
+        )
+
+        # 使用新算法计算当日盈亏（考虑今日交易）
+        daily_pnl, daily_pnl_pct = calculate_daily_pnl(
+            current_price=current_price,
+            pre_close=pre_close,
+            current_qty=pos.quantity,
+            avg_cost=pos.avg_cost,
+            today_buy_qty=today_buy_qty,
+            today_buy_price=today_buy_price,
+            today_sell_qty=today_sell_qty,
+            today_sell_price=today_sell_price,
+        )
 
         position_details.append({
             "id": pos.id,
@@ -519,10 +662,24 @@ async def get_all_portfolios_summary(session: AsyncSession = Depends(get_session
             portfolio_value += value
             total_value += value
 
-            # Daily PnL
-            daily_change = (current_price - pre_close) * pos.quantity
-            portfolio_daily_pnl += daily_change
-            total_daily_pnl += daily_change
+            # 获取今日交易记录，用于精确计算当日盈亏
+            today_buy_qty, today_buy_price, today_sell_qty, today_sell_price = await _get_today_trades(
+                session, portfolio.id, pos.code
+            )
+
+            # 使用新算法计算当日盈亏（考虑今日交易）
+            daily_pnl, _ = calculate_daily_pnl(
+                current_price=current_price,
+                pre_close=pre_close,
+                current_qty=pos.quantity,
+                avg_cost=pos.avg_cost,
+                today_buy_qty=today_buy_qty,
+                today_buy_price=today_buy_price,
+                today_sell_qty=today_sell_qty,
+                today_sell_price=today_sell_price,
+            )
+            portfolio_daily_pnl += daily_pnl
+            total_daily_pnl += daily_pnl
 
         portfolio_pnl = portfolio_value - portfolio_cost
         portfolio_pnl_pct = (portfolio_pnl / portfolio_cost * 100) if portfolio_cost > 0 else 0
@@ -607,6 +764,9 @@ async def create_transaction(
             position.total_dividend += transaction.price
         else:  # TAX
             position.total_tax += transaction.price
+        # 显式添加并刷新到数据库
+        session.add(position)
+        await session.flush()
 
     db_transaction = Transaction(
         portfolio_id=portfolio_id,
@@ -807,6 +967,9 @@ async def import_transactions(
                     position.total_dividend += price
                 else:  # TAX
                     position.total_tax += price
+                # 显式添加并刷新到数据库
+                session.add(position)
+                await session.flush()
 
                 db_transaction = Transaction(
                     portfolio_id=portfolio_id,

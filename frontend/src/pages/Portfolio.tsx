@@ -19,7 +19,8 @@ import {
   message,
   Select,
   Tabs,
-  Tag
+  Tag,
+  Dropdown
 } from 'antd'
 import {
   FolderOutlined,
@@ -29,7 +30,8 @@ import {
   ArrowUpOutlined,
   ArrowDownOutlined,
   UploadOutlined,
-  DownloadOutlined
+  DownloadOutlined,
+  TransactionOutlined
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -292,6 +294,17 @@ export default function PortfolioPage() {
     }
   }
 
+  // 快捷记账：从持仓列表直接添加交易记录
+  const handleQuickTransaction = (position: PositionDetail, tradeType: TradeType) => {
+    // 预填充股票信息
+    transactionForm.setFieldsValue({
+      stock: `${position.code}|${position.name}`,
+      trade_type: tradeType
+    })
+    setSelectedTradeType(tradeType)
+    setAddTransactionModalOpen(true)
+  }
+
   const handleDeleteTransaction = async (transactionId: number) => {
     if (!selectedPortfolio) return
 
@@ -412,19 +425,35 @@ export default function PortfolioPage() {
     {
       title: '操作',
       key: 'action',
-      width: 100,
+      width: 120,
       render: (_: any, record: PositionDetail) => (
         <Space size="small">
+          {/* 快捷记账下拉菜单 */}
+          <Dropdown
+            menu={{
+              items: [
+                { key: 'BUY', label: '买入', onClick: () => handleQuickTransaction(record, 'BUY') },
+                { key: 'SELL', label: '卖出', onClick: () => handleQuickTransaction(record, 'SELL') },
+                { type: 'divider' },
+                { key: 'DIVIDEND', label: '分红', onClick: () => handleQuickTransaction(record, 'DIVIDEND') },
+                { key: 'TAX', label: '税费', onClick: () => handleQuickTransaction(record, 'TAX') },
+              ]
+            }}
+            trigger={['click']}
+          >
+            <Button type="text" icon={<TransactionOutlined />} title="记账" />
+          </Dropdown>
           <Button
             type="text"
             icon={<EditOutlined />}
             onClick={() => handleEditPosition(record)}
+            title="编辑"
           />
           <Popconfirm
             title="确定删除该持仓？"
             onConfirm={() => handleDeletePosition(record.id)}
           >
-            <Button type="text" danger icon={<DeleteOutlined />} />
+            <Button type="text" danger icon={<DeleteOutlined />} title="删除" />
           </Popconfirm>
         </Space>
       )
