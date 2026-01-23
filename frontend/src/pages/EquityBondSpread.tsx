@@ -194,6 +194,9 @@ export default function EquityBondSpread() {
       timeScale: {
         borderColor: '#334155',
         timeVisible: false,
+        minBarSpacing: 0.001,  // 允许缩小到看到全部数据
+        fixLeftEdge: true,     // 固定左边缘，防止滚动超出数据范围
+        fixRightEdge: true,    // 固定右边缘，防止滚动超出数据范围
       },
       crosshair: {
         mode: 1,
@@ -327,16 +330,26 @@ export default function EquityBondSpread() {
       }
 
       const containerRect = chartContainer.getBoundingClientRect()
-      let tooltipX = param.point.x + 15
-      let tooltipY = param.point.y + 15
+      const tooltipWidth = 220
+      const tooltipHeight = 180
+      const offsetX = 60  // 水平偏移量，确保不挡住垂直十字线
+      const offsetY = 20  // 垂直偏移量
 
-      // 防止tooltip超出右边界
-      if (tooltipX + 220 > containerRect.width) {
-        tooltipX = param.point.x - 235
+      // 根据鼠标位置动态调整 tooltip 方向，避免遮挡选中点和十字线
+      // 水平方向：鼠标在左半边则 tooltip 显示在右边，反之亦然
+      let tooltipX: number
+      if (param.point.x < containerRect.width / 2) {
+        tooltipX = param.point.x + offsetX
+      } else {
+        tooltipX = param.point.x - tooltipWidth - offsetX
       }
-      // 防止tooltip超出下边界
-      if (tooltipY + 180 > containerRect.height) {
-        tooltipY = param.point.y - 195
+
+      // 垂直方向：鼠标在上半边则 tooltip 显示在下边，反之亦然
+      let tooltipY: number
+      if (param.point.y < containerRect.height / 2) {
+        tooltipY = param.point.y + offsetY
+      } else {
+        tooltipY = param.point.y - tooltipHeight - offsetY
       }
 
       setTooltip({

@@ -177,6 +177,9 @@ export default function BuffettIndex() {
       timeScale: {
         borderColor: '#334155',
         timeVisible: false,
+        minBarSpacing: 0.001,  // 允许缩小到看到全部数据
+        fixLeftEdge: true,     // 固定左边缘，防止滚动超出数据范围
+        fixRightEdge: true,    // 固定右边缘，防止滚动超出数据范围
       },
       crosshair: {
         mode: 1,
